@@ -167,7 +167,7 @@ command that explains a rule — a rule that needs explaining is enforced in the
 |---|---|
 | `insights new-app NAME --kind web\|job --team T --owner GROUP` | Generate a new app repo: manifest, `pyproject.toml`, source stub, four CI workflows |
 | `insights doctor` | Everything CI will check, checked locally first — **the same code path**, so they cannot disagree |
-| `insights datasets` | This app's service identity, what it declares, whether the data owner has granted it, and what else is registered (name and owner only — not a data catalog) |
+| `insights connections [--probe]` | What this app connects to, whether its secrets resolve, and — with `--probe` — whether it can actually connect |
 | `insights build --show` | Print this repo's Dockerfile, or the template if it has none |
 | `insights build --write` | Write the generated Dockerfile into this repo. It is yours from then on |
 | `insights build` | Render it to `.insights/` and run `docker build` |
@@ -176,7 +176,7 @@ command that explains a rule — a rule that needs explaining is enforced in the
 | `insights status` | Every registered app: team, kind, SDK version, last seen |
 | `insights logs --app A --startup` | The **process** log: uvicorn output, import errors, tracebacks. Where an app that never came up explains itself |
 | `insights logs --app A [--stream audit] [--json]` | The **telemetry**: structured records the app emitted. Where a running app explains what it did, for whom, and how many rows |
-| `insights access [--dataset D]` | Print the access request to send and who to ask. There is no `approve` — the platform does not own the data |
+
 | `insights compliance-report --dataset D` | The artefact you hand a compliance reviewer |
 | `insights upgrade-scaffold [--check]` | Re-render the platform-owned files in this repo |
 
