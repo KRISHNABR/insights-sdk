@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import __version__, config
+from ..data import _sensitivity
 from ..errors import InsightsError
 from . import scaffold
 
@@ -196,7 +197,7 @@ def cmd_doctor(args) -> int:
                 print(f"        run: insights access request --dataset {request.dataset}")
                 problems += 1
         else:
-            print(_ok(f"dataset {request.dataset} ({resolved.dataset.classification})"))
+            print(_ok(f"dataset {request.dataset} ({_sensitivity(resolved)})"))
 
     if manifest.sdk_floor and "==" not in manifest.sdk_floor:
         print(_ok(f"sdk floor {manifest.sdk_floor} (supported: {', '.join(__import__('insights_sdk').SUPPORTED_VERSIONS)})"))
@@ -225,14 +226,14 @@ def cmd_datasets(args) -> int:
         if resolved.restricted:
             grant = grants.for_app(request.dataset, manifest.app)
             note = f"  granted {grant['granted_at'][:10]}" if grant else "  NOT GRANTED"
-        print(f"    {request.dataset:<22} {resolved.dataset.classification:<12} {resolved.dataset.owner}{note}")
+        print(f"    {request.dataset:<22} {_sensitivity(resolved):<12} {resolved.dataset.owner}{note}")
 
     others = [name for name in sorted(catalog.datasets) if not manifest.declares(name)]
     if others:
         print("\n  AVAILABLE TO REQUEST  (ask the owner - the platform does not decide this)")
         for name in others:
             dataset = catalog.datasets[name]
-            print(f"    {name:<22} {dataset.classification:<12} {dataset.owner}")
+            print(f"    {name:<22} {('restricted' if dataset.restricted else 'standard'):<12} {dataset.owner}")
             print(f"    {'':22} {dataset.description}")
     return 0
 
@@ -269,7 +270,7 @@ def cmd_compliance_report(args) -> int:
         print(f"no dataset '{dataset_name}'")
         return 1
 
-    print(f"DATASET  {dataset_name}      classification: {dataset.classification}     owner: {dataset.owner}\n")
+    print(f"DATASET  {dataset_name}      sensitivity: {'restricted' if dataset.restricted else 'standard'}     owner: {dataset.owner}\n")
 
     print("APPS WITH ACCESS")
     granted = [g for g in grants.grants if g["dataset"] == dataset_name]
@@ -311,7 +312,7 @@ def cmd_access(args) -> int:
         dataset = config.catalog().datasets[args.dataset]
         print(
             f"access request\n"
-            f"  dataset : {args.dataset} ({dataset.classification})\n"
+            f"  dataset : {args.dataset} ({'restricted' if dataset.restricted else 'standard'})\n"
             f"  app     : {manifest.app} ({manifest.team})\n"
             f"  approver: {dataset.owner}\n"
             f"  reason  : {args.reason}\n\n"
@@ -391,6 +392,10 @@ def cmd_up(args) -> int:
         INSIGHTS_WAREHOUSE_DSN=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         INSIGHTS_DIRECTORY_URL=f"http://127.0.0.1:{directory_port}",
         INSIGHTS_SINK_DIR=str(_sink_dir()),
+        # In production these come from the base image. Locally the four repos are
+        # not installed, so the CLI points at the same files the image would carry.
+        INSIGHTS_TEMPLATES=str(platform / "runtime" / "base-image" / "design-system"),
+        INSIGHTS_OUTPUT_DIR=str(platform / "runtime" / "outputs"),
         PYTHONPATH=_pythonpath(platform),
     )
 
@@ -441,6 +446,8 @@ def cmd_run(args) -> int:
         INSIGHTS_SINK_DIR=str(_sink_dir()),
         INSIGHTS_APP_MANIFEST=str(manifest.path),
         INSIGHTS_APP=manifest.app,
+        INSIGHTS_TEMPLATES=str(platform / "runtime" / "base-image" / "design-system"),
+        INSIGHTS_OUTPUT_DIR=str(platform / "runtime" / "outputs"),
         PYTHONPATH=_pythonpath(platform),
     )
     if manifest.kind == "job":

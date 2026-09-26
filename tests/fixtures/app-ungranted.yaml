@@ -1,10 +1,12 @@
-# Declares a restricted dataset it was never granted. Proves that declaring is not enough.
+# Declares a restricted dataset it was never granted. Proves declaring is not enough.
 apiVersion: v1
 app: curious-app
 team: some-team
 kind: web
-owners: [MG-SOME-TEAM]
-runtime: {sdk: ">=0.1,<1"}
+access:
+  manage: {owners: [MG-SOME-TEAM]}
+  roles: []
+runtime: {sdk: ">=0.1,<1", base: python-web}
 data:
   - {dataset: hr.compensation, access: read}
-access: {roles: []}
+web: {route: /curious, type: api}

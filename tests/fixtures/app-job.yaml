@@ -2,9 +2,19 @@ apiVersion: v1
 app: comp-report
 team: people-analytics
 kind: job
-schedule: "0 6 * * MON"
-owners: [MG-PEOPLE-ANALYTICS]
-runtime: {sdk: ">=0.1,<1"}
+access:
+  manage:
+    owners: [MG-PEOPLE-ANALYTICS]
+  roles: []
+runtime: {sdk: ">=0.1,<1", base: python-data, size: medium}
 data:
   - {dataset: hr.compensation, access: read}
-access: {roles: [comp-analyst]}
+job:
+  schedule: "0 6 * * MON"
+  timezone: Europe/Dublin
+  timeout: 30m
+  retries: 2
+  concurrency: forbid
+  catchup: false
+outputs:
+  - {name: weekly-equity-summary, kind: file, format: csv, retention: 90d}

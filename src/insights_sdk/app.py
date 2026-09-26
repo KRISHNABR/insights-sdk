@@ -87,6 +87,30 @@ def web_app(**fastapi_kwargs: Any):
             response.headers["X-Request-Id"] = caller.request_id
             return response
 
+    # `spa`: serve the tenant's own frontend from the SAME origin as its API.
+    # Same-origin is the whole security argument - the browser holds a session
+    # cookie it cannot read, and never a token an XSS bug could exfiltrate. The
+    # platform SERVES the bundle; it does not build it. No Node in the image.
+    #
+    # Mounted at "/" on STARTUP rather than here, because a mount added now would
+    # be registered before the tenant's own @app.get decorators have run and would
+    # shadow every one of them. Appending at startup puts the catch-all last,
+    # which is where a catch-all belongs.
+    if manifest.web and manifest.web.type == "spa":
+        static_dir = manifest.path.parent / "static"
+
+        def _mount_frontend() -> None:
+            from fastapi.staticfiles import StaticFiles
+            from starlette.routing import Mount
+
+            if static_dir.is_dir():
+                application.router.routes.append(
+                    Mount("/", app=StaticFiles(directory=static_dir, html=True), name="static")
+                )
+                log.info("frontend_mounted", path=str(static_dir.name))
+
+        application.router.on_startup.append(_mount_frontend)
+
     @application.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, Any]:
         return _health(manifest)

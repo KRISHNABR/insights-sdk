@@ -24,7 +24,16 @@ DEFAULT_ENV = "local"
 
 # Keys a tenant manifest may contain. Anything else is rejected rather than ignored,
 # because a silently-ignored key is a tenant believing something is configured.
-_ALLOWED_TOP = {"apiVersion", "app", "team", "kind", "owners", "runtime", "data", "access", "schedule"}
+_ALLOWED_TOP = {
+    "apiVersion", "app", "team", "kind",
+    "access",        # who manages the app, and who may use it
+    "runtime",       # base image, size, sdk floor
+    "data",          # dataset names
+    "web",           # kind: web  - route, type, health
+    "job",           # kind: job  - schedule, timeout, retries, concurrency...
+    "outputs",       # what a job produces
+    "environments",  # dev / uat / prod, and who approves each
+}
 
 # Words that describe MECHANISM. A manifest declares intent, never mechanism - so these
 # may not appear anywhere in it, at any depth. This is "declare, don't wire" made
@@ -62,20 +71,100 @@ class DatasetRequest:
 
 
 @dataclass(frozen=True)
+class AppRole:
+    """A role the app checks at runtime, and the corporate groups behind it.
+
+    The platform reconciles `groups` into the edge's authorization table at deploy
+    time, so nobody hand-creates a group and nobody hand-checks membership.
+    """
+
+    name: str
+    groups: tuple[str, ...]
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class Manage:
+    """Who may change, deploy and govern the app - the CONTROL plane.
+
+    Deliberately separate from AppRole, which is the DATA plane. Being able to
+    deploy an app is not the same as being allowed to read what it reads, and
+    conflating the two is the most common way an internal platform leaks.
+    """
+
+    owners: tuple[str, ...] = ()          # prod approvers; the only group that may request data
+    contributors: tuple[str, ...] = ()    # dev/uat approvers; logs; no prod, no data requests
+    readers: tuple[str, ...] = ()         # status and telemetry only
+
+
+@dataclass(frozen=True)
+class JobSpec:
+    """The operational contract for kind: job."""
+
+    schedule: str
+    timezone: str = "UTC"
+    timeout: str = "30m"
+    retries: int = 0
+    concurrency: str = "forbid"           # forbid | allow
+    catchup: bool = False
+    on_failure: str = "notify-owners"
+
+
+@dataclass(frozen=True)
+class WebSpec:
+    """The shape of a kind: web app.
+
+    `type` picks the base image, how identity reaches the code and the health
+    contract. It does NOT change how data is reached - query() is identical in
+    all of them, because the SDK is a library rather than a framework integration.
+
+    There is deliberately no server-rendered template shape. Supporting one would
+    mean the platform owning a UI framework - a layout, a component library, CSS -
+    and that is not a thing three engineers should maintain forever when Streamlit
+    already does it better.
+    """
+
+    route: str
+    type: str = "api"                     # api | spa | streamlit
+    health: str = "/healthz"
+
+
+@dataclass(frozen=True)
 class Manifest:
     app: str
     team: str
-    kind: str                       # "web" | "job"
-    owners: tuple[str, ...]
+    kind: str                             # "web" | "job"
+    manage: Manage
+    roles: tuple[AppRole, ...]
     sdk_floor: str
+    base: str
+    size: str
     datasets: tuple[DatasetRequest, ...]
-    roles: tuple[str, ...]
-    schedule: str | None
+    web: WebSpec | None
+    job: JobSpec | None
+    outputs: tuple[dict, ...]
+    environments: dict
     path: Path
 
     def declares(self, dataset: str) -> bool:
         """Step 2 of the broker. Knowing a dataset's name is not access."""
         return any(d.dataset == dataset for d in self.datasets)
+
+    @property
+    def owners(self) -> tuple[str, ...]:
+        return self.manage.owners
+
+    @property
+    def role_names(self) -> tuple[str, ...]:
+        return tuple(r.name for r in self.roles)
+
+    @property
+    def schedule(self) -> str | None:
+        return self.job.schedule if self.job else None
+
+    @property
+    def web_type(self) -> str:
+        return self.web.type if self.web else "none"
 
     @property
     def service_subject(self) -> str:
@@ -112,6 +201,10 @@ def _find_manifest() -> Path:
     )
 
 
+VALID_WEB_TYPES = ("api", "spa", "streamlit")
+VALID_BASES = ("python-web", "python-data", "python-min", "python-streamlit")
+
+
 def load_manifest(path: str | Path | None = None) -> Manifest:
     target = Path(path) if path else _find_manifest()
     if not target.is_file():
@@ -126,7 +219,7 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
         raise ManifestError(f"{target}: unknown key(s) {sorted(unknown)}. Allowed: {sorted(_ALLOWED_TOP)}")
     _scan_forbidden(raw, str(target))
 
-    for required in ("app", "team", "kind", "owners"):
+    for required in ("app", "team", "kind"):
         if not raw.get(required):
             raise ManifestError(f"{target}: '{required}' is required")
 
@@ -134,13 +227,36 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
     if kind not in ("web", "job"):
         raise ManifestError(f"{target}: kind must be 'web' or 'job', got {kind!r}")
 
-    schedule = raw.get("schedule")
-    # `kind` has to mean something, or it is decoration. These two rules are what make it real.
-    if kind == "job" and not schedule:
-        raise ManifestError(f"{target}: a job must declare a schedule - the platform runs it, not you")
-    if kind == "web" and schedule:
-        raise ManifestError(f"{target}: a web app must not declare a schedule")
+    # ---- access: control plane and data plane, kept apart --------------------
+    access = raw.get("access") or {}
+    manage_raw = access.get("manage") or {}
+    manage = Manage(
+        owners=tuple(manage_raw.get("owners") or ()),
+        contributors=tuple(manage_raw.get("contributors") or ()),
+        readers=tuple(manage_raw.get("readers") or ()),
+    )
+    if not manage.owners:
+        raise ManifestError(
+            f"{target}: access.manage.owners is required - somebody has to be able to approve a "
+            f"production deploy and answer for this app. It must be a corporate group, not a person."
+        )
+    for group in manage.owners + manage.contributors + manage.readers:
+        if "@" in group:
+            raise ManifestError(
+                f"{target}: '{group}' looks like an individual. Use a corporate group - "
+                f"individuals leave, and an app owned by someone who left is an orphan."
+            )
 
+    roles = tuple(
+        AppRole(
+            name=r["name"],
+            groups=tuple(r.get("groups") or ()),
+            description=r.get("description", ""),
+        )
+        for r in (access.get("roles") or [])
+    )
+
+    # ---- runtime -------------------------------------------------------------
     runtime = raw.get("runtime") or {}
     floor = runtime.get("sdk")
     if not floor:
@@ -152,22 +268,67 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
             f"{target}: runtime.sdk is pinned ({floor!r}). Declare a floor and a major bound, "
             f"e.g. '>=0.1,<1', so patches and minors reach you automatically. See ADR-001."
         )
+    base = runtime.get("base", "python-web" if kind == "web" else "python-data")
+    if base not in VALID_BASES:
+        raise ManifestError(
+            f"{target}: runtime.base {base!r} is not published. Run `insights runtimes`. "
+            f"You declare a runtime; you do not build an image."
+        )
+
+    # ---- kind-specific blocks: this is what makes `kind` mean something ------
+    web = job = None
+    if kind == "web":
+        if raw.get("job"):
+            raise ManifestError(f"{target}: a web app must not declare a job block")
+        web_raw = raw.get("web") or {}
+        web_type = web_raw.get("type", "api")
+        if web_type not in VALID_WEB_TYPES:
+            raise ManifestError(f"{target}: web.type must be one of {VALID_WEB_TYPES}, got {web_type!r}")
+        web = WebSpec(
+            route=web_raw.get("route", f"/{raw['app']}"),
+            type=web_type,
+            health=web_raw.get("health", "/healthz"),
+        )
+    else:
+        if raw.get("web"):
+            raise ManifestError(f"{target}: a job must not declare a web block")
+        job_raw = raw.get("job") or {}
+        if not job_raw.get("schedule"):
+            raise ManifestError(
+                f"{target}: a job must declare job.schedule - the platform runs it, you don't"
+            )
+        concurrency = job_raw.get("concurrency", "forbid")
+        if concurrency not in ("forbid", "allow"):
+            raise ManifestError(f"{target}: job.concurrency must be 'forbid' or 'allow'")
+        job = JobSpec(
+            schedule=job_raw["schedule"],
+            timezone=job_raw.get("timezone", "UTC"),
+            timeout=job_raw.get("timeout", "30m"),
+            retries=int(job_raw.get("retries", 0)),
+            concurrency=concurrency,
+            catchup=bool(job_raw.get("catchup", False)),
+            on_failure=job_raw.get("on_failure", "notify-owners"),
+        )
 
     datasets = tuple(
         DatasetRequest(dataset=d["dataset"], access=d.get("access", "read"))
         for d in (raw.get("data") or [])
     )
-    roles = tuple((raw.get("access") or {}).get("roles") or [])
 
     return Manifest(
         app=raw["app"],
         team=raw["team"],
         kind=kind,
-        owners=tuple(raw["owners"]),
-        sdk_floor=str(floor),
-        datasets=datasets,
+        manage=manage,
         roles=roles,
-        schedule=schedule,
+        sdk_floor=str(floor),
+        base=base,
+        size=runtime.get("size", "small"),
+        datasets=datasets,
+        web=web,
+        job=job,
+        outputs=tuple(raw.get("outputs") or ()),
+        environments=raw.get("environments") or {},
         path=target,
     )
 
@@ -179,25 +340,46 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
 @dataclass(frozen=True)
 class Connection:
     name: str
-    engine: str                     # "warehouse" | "rest"
+    engine: str                     # "databricks" | "rest"
     description: str
     environments: dict
+    governance: str = "none"        # external | local-approximation | none
+
+    def governance_for(self, environment: str) -> str:
+        """Who enforces column and row access for this connection, here.
+
+        `external` means Unity Catalog does it and the broker must NOT - see
+        ADR-002 s2. `local-approximation` is the laptop stand-in so the
+        behaviour is demonstrable without a workspace.
+        """
+        return (self.environments.get(environment) or {}).get("governance", self.governance)
 
 
 @dataclass(frozen=True)
 class Dataset:
+    """A nickname, where it points, and who to ask.
+
+    Note what is absent: classification and masking rules. Those are Unity
+    Catalog tags and UC masking functions - enforced on every path to the data,
+    not just ours. This registry is a projection (ADR-002 s2).
+    """
+
     name: str
     description: str
     connection: str
-    classification: str             # internal | confidential | restricted
     owner: str
     locations: dict
-    masking: dict                   # field -> role required to see it unmasked
-    sensitive_fields: tuple[str, ...]
+    local_masking: dict             # laptop-only stand-in for UC column masks
+    sensitive_fields: tuple[str, ...]   # ours: about our log pipeline, not the data platform
 
     @property
     def restricted(self) -> bool:
-        return self.classification == "restricted"
+        """True when UC tags this `sensitivity=restricted`.
+
+        Locally we infer it from the presence of masking rules, since there is no
+        UC to ask. In dev and prod the deploy pipeline reads the UC tag.
+        """
+        return bool(self.local_masking) or bool(self.sensitive_fields)
 
 
 @dataclass(frozen=True)
@@ -213,6 +395,15 @@ class Resolved:
     @property
     def restricted(self) -> bool:
         return self.dataset.restricted
+
+    @property
+    def physical(self) -> str:
+        """The name to substitute for the alias, in this environment.
+
+        Locally that is a table name; in dev and prod it is the Unity Catalog
+        three-level name. The tenant's SQL says the alias either way.
+        """
+        return self.location.get("uc") or self.location["table"]
 
 
 @dataclass(frozen=True)
@@ -264,6 +455,7 @@ def load_catalog(path: str | Path | None = None) -> Catalog:
             engine=body["engine"],
             description=body.get("description", ""),
             environments=body.get("environments", {}),
+            governance=body.get("governance", "none"),
         )
         for name, body in (raw.get("connections") or {}).items()
     }
@@ -272,10 +464,9 @@ def load_catalog(path: str | Path | None = None) -> Catalog:
             name=name,
             description=body.get("description", ""),
             connection=body["connection"],
-            classification=body.get("classification", "internal"),
             owner=body["owner"],
             locations=body.get("locations", {}),
-            masking=body.get("masking", {}) or {},
+            local_masking=body.get("local_masking", {}) or {},
             sensitive_fields=tuple(body.get("sensitive_fields", []) or []),
         )
         for name, body in (raw.get("datasets") or {}).items()

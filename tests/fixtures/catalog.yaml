@@ -3,7 +3,7 @@
 # real shape, which is the thing under test.
 connections:
   warehouse-main:
-    engine: warehouse
+    engine: databricks
     environments:
       local: {dsn_env: INSIGHTS_WAREHOUSE_DSN}
       prod:  {dsn_env: INSIGHTS_WAREHOUSE_DSN}
@@ -15,30 +15,26 @@ connections:
 datasets:
   hr.headcount:
     connection: warehouse-main
-    classification: internal
     owner: MG-PEOPLE-OPS
     locations:
       local: {table: hr_headcount}
       prod:  {table: hr_headcount_v2}     # different physical name, same alias
   hr.compensation:
     connection: warehouse-main
-    classification: restricted
     owner: MG-PEOPLE-ANALYTICS
     locations:
       local: {table: hr_compensation}
-    masking:
+    local_masking:
       employee_name: comp-analyst
       base_salary:   comp-analyst
     sensitive_fields: [employee_id, employee_name, base_salary, bonus_pct]
   sales.pipeline:
     connection: warehouse-main
-    classification: internal
     owner: MG-SALES-OPS
     locations:
       local: {table: sales_pipeline}
   directory.people:
     connection: directory-api
-    classification: internal
     owner: MG-PEOPLE-OPS
     locations:
       local: {resource: /people}

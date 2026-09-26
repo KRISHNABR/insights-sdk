@@ -25,8 +25,18 @@ from .errors import EntitlementError, InsightsError
 MASK = "***"
 
 
+def _sensitivity(resolved: Resolved) -> str:
+    """What the audit record says about the data's sensitivity.
+
+    Authoritatively this is a Unity Catalog tag. We record our view of it so the
+    correlation record is self-describing - UC's own audit remains the source of
+    truth, and `insights compliance-report` reads both.
+    """
+    return "restricted" if resolved.restricted else "standard"
+
+
 def _verb_for(engine: str) -> str:
-    return {"warehouse": "query()", "rest": "fetch()"}.get(engine, engine)
+    return {"databricks": "query()", "local-sql": "query()", "rest": "fetch()"}.get(engine, engine)
 
 
 def _effective_roles(caller: identity.Caller, grant: dict | None) -> tuple[str, ...]:
@@ -101,14 +111,15 @@ def _rewrite_and_scope(sql: str, alias: str, resolved: Resolved) -> str:
             f"your SQL does not reference '{alias}', the dataset you named. Query the alias "
             f"directly - the platform substitutes the physical table for this environment."
         )
-    physical = resolved.location["table"]
+    physical = resolved.physical
     rewritten = token.sub(physical, sql)
 
     catalog = config.catalog()
     for other_name, other in catalog.datasets.items():
         if other_name == alias:
             continue
-        other_physical = (other.locations.get(resolved.env) or {}).get("table")
+        other_loc = other.locations.get(resolved.env) or {}
+        other_physical = other_loc.get("uc") or other_loc.get("table")
         for needle in filter(None, (other_name, other_physical)):
             if re.search(r"(?<![\w.])" + re.escape(needle) + r"(?![\w.])", rewritten):
                 raise EntitlementError(
@@ -119,13 +130,26 @@ def _rewrite_and_scope(sql: str, alias: str, resolved: Resolved) -> str:
 
 
 def _mask(rows: list[dict], resolved: Resolved, roles: tuple[str, ...]) -> tuple[list[dict], int]:
-    """Step 8. Hide fields this caller's roles do not permit.
+    """Apply column masking - ONLY where the data platform cannot.
 
-    Masking rather than omission, deliberately: an app that gets a column back as `***`
-    keeps working and its author learns the column exists but is not for them. A column
-    that silently vanishes produces a confusing bug report instead of a clear one.
+    In dev and prod this is a no-op. Unity Catalog applies column masks and row
+    filters itself, for every reader on every path including notebooks, and a
+    second masking implementation beside it would be a second source of truth
+    that drifts silently. See ADR-002 s2.
+
+    Locally there is no Unity Catalog, so this approximates it from the
+    registry's `local_masking` block. The behaviour a developer sees on a laptop
+    therefore matches production; the ENFORCER differs, and that difference is
+    documented rather than hidden.
+
+    Masking rather than omission, deliberately: a column returned as `***` keeps
+    the app working and tells its author the column exists but is not for them. A
+    column that silently vanishes produces a confusing bug report instead.
     """
-    rules = resolved.dataset.masking
+    if resolved.connection.governance_for(resolved.env) == "external":
+        return rows, 0              # Unity Catalog already did this, per person
+
+    rules = resolved.dataset.local_masking
     if not rules or not rows:
         return rows, 0
     hidden = [field for field, role in rules.items() if role not in roles]
@@ -152,7 +176,7 @@ def _execute(alias: str, expected_engine: str, request: Any, sql_for_rewrite: st
 
     obs.audit_read(                                                         # 9
         dataset=alias,
-        classification=resolved.dataset.classification,
+        classification=_sensitivity(resolved),
         owner=resolved.dataset.owner,
         connection=resolved.connection.name,
         rows=len(rows),
@@ -170,7 +194,7 @@ def query(dataset: str, sql: str, **params: Any) -> list[dict]:
     whichever environment this is, so the same query works everywhere. Bind values with
     named parameters (`:month`); never format them into the string.
     """
-    return _execute(dataset, "warehouse", params, sql_for_rewrite=sql)
+    return _execute(dataset, "databricks", params, sql_for_rewrite=sql)
 
 
 def fetch(dataset: str, *, params: dict[str, Any] | None = None) -> list[dict]:
@@ -191,7 +215,7 @@ def fetch(dataset: str, *, params: dict[str, Any] | None = None) -> list[dict]:
     rows, masked_count = _mask(rows, resolved, roles)
     obs.audit_read(
         dataset=dataset,
-        classification=resolved.dataset.classification,
+        classification=_sensitivity(resolved),
         owner=resolved.dataset.owner,
         connection=resolved.connection.name,
         rows=len(rows),

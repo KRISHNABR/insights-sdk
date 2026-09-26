@@ -2,9 +2,18 @@ apiVersion: v1
 app: headcount-dashboard
 team: people-ops
 kind: web
-owners: [MG-PEOPLE-OPS]
-runtime: {sdk: ">=0.1,<1"}
+access:
+  manage:
+    owners: [MG-PEOPLE-OPS]
+    contributors: [MG-PEOPLE-OPS-ENG]
+  roles:
+    - name: headcount-viewer
+      groups: [MG-PEOPLE-OPS, MG-FINANCE-BI]
+runtime: {sdk: ">=0.1,<1", base: python-web, size: small}
 data:
   - {dataset: hr.headcount, access: read}
   - {dataset: directory.people, access: read}
-access: {roles: [headcount-viewer]}
+web: {route: /headcount-dashboard, type: spa}
+environments:
+  dev:  {auto_deploy: true}
+  prod: {auto_deploy: false, approvers: owners}

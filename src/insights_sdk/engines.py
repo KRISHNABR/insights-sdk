@@ -35,8 +35,19 @@ def _required_env(name: str, connection: str) -> str:
     return value
 
 
-class WarehouseEngine:
-    """The analytics warehouse. Stubbed as SQLite; the seam is the DSN."""
+class LocalSqlEngine:
+    """The lakehouse, locally.
+
+    Backed by a SQL database (SQLite in tests, Postgres in the compose stack)
+    because there is no Databricks emulator. Postgres is the closest honest
+    stand-in: it has real users and real GRANTs, so restricted-data behaviour is
+    demonstrable on a laptop rather than merely described.
+
+    What it does NOT reproduce is Unity Catalog. Column masks and row filters are
+    approximated from the registry's `local_masking` block, so governance is only
+    exactly right against a real workspace. That gap is documented (ADR-002 s2)
+    rather than hidden.
+    """
 
     def run(self, resolved: Resolved, request: Any) -> list[dict]:
         sql, params = request
@@ -50,6 +61,68 @@ class WarehouseEngine:
             return [dict(row) for row in cur.fetchall()]
         finally:
             conn.close()
+
+
+class DatabricksEngine:
+    """The lakehouse, for real.
+
+    Two things make this different from an ordinary database client, and both are
+    the point of the design:
+
+    1. **No stored credential.** An interactive app exchanges the signed-in user's
+       session for a short-lived Databricks token, so Unity Catalog sees the
+       actual person and applies THEIR grants, column masks and row filters. A
+       scheduled job uses workload identity federation from its ECS task role.
+       Either way nothing is persisted and there is no secret to read.
+    2. **No masking here.** UC enforces column and row access itself, on every
+       path to the data including notebooks. The broker deliberately does not.
+
+    Not exercised in this submission - there is no workspace to reach. The
+    structure is what matters: it is the same interface as every other adapter,
+    so everything above it is unchanged.
+    """
+
+    def run(self, resolved: Resolved, request: Any) -> list[dict]:
+        sql, params = request
+        settings = resolved.connection.environments[resolved.env]
+        host = _required_env(settings["host_env"], resolved.connection.name)
+        warehouse = _required_env(settings["warehouse_env"], resolved.connection.name)
+
+        from .identity import current_user
+
+        caller = current_user()
+        # The bridge. A person gets a token minted for them; a job federates its
+        # workload identity. Neither path reads a secret.
+        token = (
+            _federate_workload_identity(host)
+            if caller.is_service
+            else _exchange_user_token(host, caller)
+        )
+
+        raise ConfigError(
+            "The Databricks adapter is structural, not wired: this submission has no "
+            "workspace to reach. See docs/ARCHITECTURE.md section 7 for the design, and "
+            "run locally against Postgres instead."
+        )
+
+
+def _exchange_user_token(host: str, caller: Any) -> str:
+    """OAuth token exchange: this user's session -> a short-lived Databricks token.
+
+    Databricks federates to the same Entra tenant as the ALB, so the subject the
+    workspace sees is the subject the browser authenticated as.
+    """
+    raise NotImplementedError("token exchange - see ADR-002 s3")
+
+
+def _federate_workload_identity(host: str) -> str:
+    """Workload identity federation: the ECS task role -> a Databricks token.
+
+    No client secret exists anywhere. The task role's OIDC identity is exchanged
+    directly, which is what makes "the platform team cannot read the credential"
+    true rather than aspirational.
+    """
+    raise NotImplementedError("workload identity federation - see ADR-002 s3")
 
 
 class RestEngine:
@@ -82,13 +155,24 @@ class RestEngine:
 
 
 _ENGINES: dict[str, Engine] = {
-    "warehouse": WarehouseEngine(),
+    "databricks": DatabricksEngine(),
+    "local-sql": LocalSqlEngine(),
     "rest": RestEngine(),
 }
 
 
 def engine_for(resolved: Resolved) -> Engine:
-    engine = _ENGINES.get(resolved.connection.engine)
+    """Pick the adapter for this connection IN THIS ENVIRONMENT.
+
+    A connection declares one logical engine - `databricks` - and the adapter
+    differs per environment: the real workspace in dev and prod, a SQL database
+    locally. The tenant never learns which, because they never named a table.
+    """
+    name = resolved.connection.engine
+    settings = resolved.connection.environments.get(resolved.env, {})
+    if name == "databricks" and "dsn_env" in settings:
+        name = "local-sql"                     # the laptop stand-in
+    engine = _ENGINES.get(name)
     if engine is None:
-        raise ConfigError(f"no adapter for engine '{resolved.connection.engine}'")
+        raise ConfigError(f"no adapter for engine '{name}'")
     return engine
