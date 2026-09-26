@@ -6,7 +6,7 @@ import pytest
 from insights_sdk.broker import fetch, query
 from insights_sdk.errors import EntitlementError, InsightsError, UnknownDatasetError
 
-from conftest import signed_in
+from conftest import FIXTURES, signed_in
 
 
 def test_an_undeclared_dataset_is_refused(platform, as_app):
@@ -48,12 +48,22 @@ def test_unknown_dataset_error_is_for_platform_mistakes_only(platform, as_app):
         config.catalog().resolve("hr.secrets")
 
 
-def test_declaring_a_restricted_dataset_is_not_enough(platform, as_app):
-    """The second key. `curious-app` declares hr.compensation; nobody granted it."""
+def test_declaring_a_dataset_does_not_grant_it(platform, as_app):
+    """A manifest is a declaration of intent, not a grant.
+
+    `curious-app` declares hr.compensation. Nobody granted it to that app's service
+    identity, so the read fails - and the error names the DATA OWNER, because the
+    platform cannot grant it and should not imply that it can.
+    """
     as_app("app-ungranted.yaml")
     with signed_in("someone@corp.example", "MG-SOME-TEAM"):
-        with pytest.raises(EntitlementError, match="dataset owner"):
+        with pytest.raises(EntitlementError) as raised:
             query("hr.compensation", "SELECT * FROM hr.compensation")
+
+    message = str(raised.value)
+    assert "sp-curious-app" in message          # names the identity that lacks access
+    assert "MG-PEOPLE-ANALYTICS" in message     # names who to ask
+    assert "platform cannot grant it" in message
 
 
 def test_a_granted_restricted_dataset_is_allowed(platform, as_app):
@@ -86,3 +96,39 @@ def test_the_wrong_verb_says_which_one_to_use(platform, as_app):
     with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         with pytest.raises(InsightsError, match=r"fetch\(\)"):
             query("directory.people", "SELECT * FROM directory.people")
+
+
+def test_a_tenant_cannot_choose_its_own_service_identity(platform, as_app, tmp_path):
+    """The one thing the platform MUST own for unattended work.
+
+    Data access is granted by the data owner to an identity. So if a team could pick
+    their own identity, they could name another app's and inherit its access. The
+    identity is derived from the registered app name and there is no manifest field
+    for it - the loader rejects unknown keys, so there is nowhere to put one.
+    """
+    from insights_sdk import config
+    from insights_sdk.errors import ManifestError
+    import yaml
+
+    as_app("app-job.yaml")
+    assert config.manifest().service_identity == "sp-comp-report"   # derived, not declared
+
+    body = yaml.safe_load((FIXTURES / "app-job.yaml").read_text())
+    body["identity"] = "sp-headcount-dashboard"          # try to claim another app's
+    path = tmp_path / "app.yaml"
+    path.write_text(yaml.safe_dump(body, sort_keys=False))
+
+    with pytest.raises(ManifestError, match="unknown key"):
+        config.load_manifest(path)
+
+
+def test_the_grant_is_keyed_on_identity_not_app_name(platform, as_app):
+    """What the data platform grants to, and what appears in its audit."""
+    from insights_sdk import config
+
+    as_app("app-job.yaml")
+    manifest = config.manifest()
+    grants = config.grants()
+
+    assert grants.for_identity("hr.compensation", manifest.service_identity) is not None
+    assert grants.for_identity("hr.compensation", "sp-someone-else") is None

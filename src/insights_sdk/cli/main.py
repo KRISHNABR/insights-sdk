@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -82,6 +83,17 @@ def _pythonpath(platform: Path) -> str:
 
 def _sink_dir() -> Path:
     return _platform() / "runtime" / "sinks"
+
+
+def _proc_log_dir() -> Path:
+    """Process logs - stdout/stderr of each local process.
+
+    Deliberately NOT the same place as the telemetry sinks. A sink record is
+    structured, redacted and treated as evidence; a process log is whatever uvicorn
+    felt like printing, including tracebacks. Keeping them apart stops anyone
+    reasoning about one as if it were the other.
+    """
+    return _platform() / "runtime" / "sinks" / "proc"
 
 
 def _read_sink(name: str) -> list[dict]:
@@ -221,12 +233,14 @@ def cmd_doctor(args) -> int:
             problems += 1
             continue
         if resolved.restricted:
-            grant = grants.for_app(request.dataset, manifest.app)
+            identity = manifest.service_identity
+            grant = grants.for_identity(request.dataset, identity)
             if grant:
-                print(_ok(f"dataset {request.dataset} (restricted) granted by {grant['granted_by']}"))
+                print(_ok(f"dataset {request.dataset} (restricted) granted to {identity} by {grant['granted_by']}"))
             else:
-                print(_bad(f"dataset {request.dataset} is restricted and not granted to {manifest.app}"))
-                print(f"        run: insights access request --dataset {request.dataset}")
+                print(_bad(f"dataset {request.dataset} is restricted and not granted to {identity}"))
+                print(f"        {resolved.dataset.owner} grants it, in the data platform.")
+                print(f"        run: insights access --dataset {request.dataset}")
                 problems += 1
         else:
             print(_ok(f"dataset {request.dataset} ({_sensitivity(resolved)})"))
@@ -239,34 +253,52 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_datasets(args) -> int:
-    """What this app can read, and what it could ask for.
+    """What this app declares, and whether its identity can actually read it.
 
-    Deliberately NOT a data catalog: a name, an owner and a one-line description, and
-    only for datasets whose owner has made them requestable. There is no search, no
-    schema and no sample data here, and that is a decision rather than an omission
-    (ADR-002 s5).
+    Deliberately NOT a data catalog. It shows three things:
+
+      * the service identity this app's unattended work runs as - derived from the
+        registered app name, so a team cannot claim another app's identity;
+      * for each dataset the app declares, whether the DATA OWNER has granted it to
+        that identity (read from the data platform; locally, from the fixture);
+      * for anything else in the registry, only a name and an owner - enough to know
+        who to ask, and nothing that describes data you cannot read (ADR-002 s5).
+
+    It does not enumerate everything you personally have access to. That is the data
+    platform's job and it already does it better.
     """
     manifest = config.manifest()
     catalog = config.catalog()
     grants = config.grants()
+    identity = manifest.service_identity
 
-    print(f"datasets for {manifest.app}\n")
-    print("  ENTITLED")
+    print(f"{manifest.app}\n")
+    print(f"  unattended work runs as   {identity}")
+    print(f"  interactive requests run as the signed-in user\n")
+
+    print("  DECLARED")
+    missing = []
     for request in manifest.datasets:
         resolved = catalog.resolve(request.dataset)
-        note = ""
-        if resolved.restricted:
-            grant = grants.for_app(request.dataset, manifest.app)
-            note = f"  granted {grant['granted_at'][:10]}" if grant else "  NOT GRANTED"
-        print(f"    {request.dataset:<22} {_sensitivity(resolved):<12} {resolved.dataset.owner}{note}")
+        if not resolved.restricted:
+            state = "ok"
+        elif grants.for_identity(request.dataset, identity):
+            state = "granted"
+        else:
+            state = "NOT GRANTED"
+            missing.append((request.dataset, resolved.dataset.owner))
+        print(f"    {request.dataset:<22} {_sensitivity(resolved):<12} {resolved.dataset.owner:<24} {state}")
 
-    others = [name for name in sorted(catalog.datasets) if not manifest.declares(name)]
+    for dataset, owner in missing:
+        print(f"\n    {dataset} is not granted to {identity}.")
+        print(f"    The platform cannot grant it. Ask {owner} to grant read access to")
+        print(f"    {identity} in the data platform, then re-run `insights doctor`.")
+
+    others = [n for n in sorted(catalog.datasets) if not manifest.declares(n)]
     if others:
-        print("\n  AVAILABLE TO REQUEST  (ask the owner - the platform does not decide this)")
+        print("\n  ALSO REGISTERED  (name and owner only - ask the owner what is in it)")
         for name in others:
-            dataset = catalog.datasets[name]
-            print(f"    {name:<22} {('restricted' if dataset.restricted else 'standard'):<12} {dataset.owner}")
-            print(f"    {'':22} {dataset.description}")
+            print(f"    {name:<22} {'restricted' if catalog.datasets[name].restricted else 'standard':<12} {catalog.datasets[name].owner}")
     return 0
 
 
@@ -304,12 +336,17 @@ def cmd_compliance_report(args) -> int:
 
     print(f"DATASET  {dataset_name}      sensitivity: {'restricted' if dataset.restricted else 'standard'}     owner: {dataset.owner}\n")
 
-    print("APPS WITH ACCESS")
+    # Reported by IDENTITY, because that is what the data platform granted to and
+    # what its audit shows. Reporting the app name here would be our own relabelling
+    # of someone else's record - and the point of this artefact is that it is not.
+    print("IDENTITIES WITH ACCESS")
     granted = [g for g in grants.grants if g["dataset"] == dataset_name]
     if not granted:
         print("  (none)")
     for grant in granted:
-        print(f"  {grant['app']:<28} granted {grant['granted_at'][:10]} by {grant['granted_by']}")
+        roles = ",".join(grant.get("roles") or ()) or "-"
+        print(f"  {grant['identity']:<28} granted {grant['granted_at'][:10]} "
+              f"by {grant['granted_by']}   roles: {roles}")
 
     reads = [r for r in _read_sink("audit") if r.get("dataset") == dataset_name]
     print(f"\nACCESS IN PERIOD{'':38}{len(reads)} reads")
@@ -333,42 +370,38 @@ def cmd_compliance_report(args) -> int:
 
 
 def cmd_access(args) -> int:
-    """Request or approve a grant. The second key for restricted data (ADR-002 s4)."""
-    registry_file = _registry() / "grants.yaml"
-    import yaml
+    """Print the access request to send, and to whom.
 
-    body = yaml.safe_load(registry_file.read_text()) if registry_file.is_file() else {"grants": [], "break_glass": []}
+    There is deliberately no `approve`. The platform does not own the data and
+    cannot grant access to it - a command that looked like it could would be
+    misleading about where authority actually lives.
+    """
+    manifest = config.manifest()
+    catalog = config.catalog()
+    grants = config.grants()
+    identity = manifest.service_identity
 
-    if args.access_command == "request":
-        manifest = config.manifest()
-        dataset = config.catalog().datasets[args.dataset]
-        print(
-            f"access request\n"
-            f"  dataset : {args.dataset} ({'restricted' if dataset.restricted else 'standard'})\n"
-            f"  app     : {manifest.app} ({manifest.team})\n"
-            f"  approver: {dataset.owner}\n"
-            f"  reason  : {args.reason}\n\n"
-            f"The platform team cannot approve this. Send it to {dataset.owner}; they run:\n"
-            f"  insights access approve --dataset {args.dataset} --app {manifest.app} --as <you>"
-        )
-        return 0
+    wanted = [args.dataset] if args.dataset else [d.dataset for d in manifest.datasets]
+    for name in wanted:
+        dataset = catalog.datasets.get(name)
+        if dataset is None:
+            print(f"no dataset '{name}' in the registry")
+            return 1
+        granted = grants.for_identity(name, identity)
+        print(f"\n  {name}   owner: {dataset.owner}   {'GRANTED' if granted else 'not granted'}")
+        if granted:
+            continue
+        print(f"""
+    Send to {dataset.owner}:
 
-    if args.access_command == "approve":
-        body.setdefault("grants", []).append(
-            {
-                "dataset": args.dataset,
-                "app": args.app,
-                "access": "read",
-                "granted_by": args.approver,
-                "granted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "expires_at": None,
-                "reason": args.reason,
-            }
-        )
-        registry_file.write_text(yaml.safe_dump(body, sort_keys=False))
-        print(f"granted {args.dataset} to {args.app}, recorded in {registry_file}")
-        return 0
-    return 1
+      Please grant read access on {name}
+      to the service identity  {identity}
+      for the app              {manifest.app} ({manifest.team})
+      reason                   {args.reason}
+
+    They grant it in the data platform, not here. `insights doctor` will go green
+    once it exists.""")
+    return 0
 
 
 def _seed_local_warehouse(platform: Path) -> Path:
@@ -391,6 +424,98 @@ def _port_free(port: int) -> bool:
 
     with socket.socket() as probe:
         return probe.connect_ex(("127.0.0.1", port)) != 0
+
+
+def cmd_logs(args) -> int:
+    """Read what the platform recorded - process logs and telemetry, one command.
+
+    "Where are the logs?" is the first question anyone asks when something does not
+    work, and until this existed the honest answer was "scroll up in the terminal
+    that is running `insights up`". That is not an answer on a platform whose whole
+    claim is that operability comes for free.
+
+    Two different things live behind one command on purpose, because the user does
+    not know which one they need yet:
+
+      --startup   the PROCESS log: uvicorn's own output, import errors, tracebacks.
+                  Where an app that never came up explains itself.
+      (default)   the TELEMETRY: structured records the SDK emitted. Where a running
+                  app explains what it did, for whom, and how many rows it touched.
+
+    In production these separate cleanly - process logs to CloudWatch, telemetry to
+    the observability stack, audit to Unity Catalog - and this command is the local
+    stand-in for all three. Same distinction, same question answered.
+    """
+    if args.startup:
+        log_dir = _proc_log_dir()
+        available = sorted(path.stem for path in log_dir.glob("*.log")) if log_dir.is_dir() else []
+        if not available:
+            print("no process logs. Start the stack with `insights up` first.")
+            return 1
+        wanted = [args.app] if args.app else available
+        missing = [name for name in wanted if name not in available]
+        if missing:
+            print(f"no process log for {', '.join(missing)}. Running: {', '.join(available)}")
+            return 1
+        for name in wanted:
+            raw = (log_dir / f"{name}.log").read_text().splitlines()
+            # Drop the structured telemetry. The SDK writes every record to stdout
+            # AS WELL AS to the sink - correct in production, where stdout is the
+            # shipping path - but it means the process log contains both. The whole
+            # point of --startup is the output that is NOT telemetry: uvicorn's
+            # banner, an import error, a traceback. Showing both buries the one
+            # line someone is looking for under a hundred they are not.
+            lines = [ln for ln in raw if not ln.lstrip().startswith('{"ts"')]
+            dropped = len(raw) - len(lines)
+            if not lines:
+                print(f"===== {name}: started cleanly, no process output =====")
+            else:
+                print(f"===== {name} ({len(lines)} lines) =====")
+                for line in lines[-args.lines:]:
+                    print(f"  {line}")
+            if dropped:
+                print(f"      ({dropped} telemetry record(s) hidden - see `insights logs --app {name}`)")
+        return 0
+
+    records = []
+    for stream in (("events", "audit") if args.stream == "all" else (args.stream,)):
+        for record in _read_sink(stream):
+            records.append(record)
+    if args.app:
+        records = [r for r in records if r.get("app") == args.app]
+    if args.event:
+        records = [r for r in records if r.get("event") == args.event]
+    records.sort(key=lambda r: r.get("ts", ""))
+
+    if not records:
+        where = f" for app '{args.app}'" if args.app else ""
+        print(f"no telemetry{where}. Run an app, or try --startup for process logs.")
+        return 0
+
+    if args.json:
+        for record in records[-args.lines:]:
+            print(json.dumps(record))
+        return 0
+
+    # The default view answers "who did what" - the fields that are the same for
+    # every record, every time. Anything app-specific goes in the tail, so a wide
+    # record never pushes the identity off the line.
+    common = {"ts", "stream", "level", "event", "env", "caller", "request_id",
+              "sdk", "app", "team"}
+    print(f"{'TIME':<21} {'STREAM':<7} {'APP':<20} {'CALLER':<24} EVENT")
+    for record in records[-args.lines:]:
+        extra = " ".join(
+            f"{k}={v}" for k, v in record.items() if k not in common and v is not None
+        )
+        marker = "*" if record.get("stream") == "audit" else " "
+        print(f"{record.get('ts',''):<21} {marker}{record.get('stream',''):<6} "
+              f"{record.get('app',''):<20} {record.get('caller',''):<24} "
+              f"{record.get('event','')}  {extra}")
+
+    audits = sum(1 for r in records if r.get("stream") == "audit")
+    print(f"\n{len(records)} record(s), {audits} marked * - a read of a governed dataset.")
+    print(f"read from {_sink_dir()}")
+    return 0
 
 
 def cmd_up(args) -> int:
@@ -454,23 +579,47 @@ def cmd_up(args) -> int:
         PYTHONPATH=_pythonpath(platform),
     )
 
-    procs = [subprocess.Popen(
+    # Every child writes to its OWN file rather than the shared terminal.
+    #
+    # Two reasons. One, `up` used to interleave four processes' output into one
+    # stream, so the first thing anyone saw was a wall of JSON from apps they had
+    # not asked about. Two, "show me why my app did not start" needs the startup
+    # log SEPARATE from the app's structured events - uvicorn's traceback is not a
+    # telemetry record and never reaches the sink. `insights logs` reads both.
+    log_dir = _proc_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handles: list = []
+
+    def _spawn(name: str, argv: list[str], cwd: Path | None, proc_env: dict):
+        handle = (log_dir / f"{name}.log").open("w")
+        handles.append(handle)
+        return subprocess.Popen(
+            argv, cwd=cwd, env=proc_env, stdout=handle, stderr=subprocess.STDOUT
+        )
+
+    procs = [_spawn(
+        "directory-stub",
         [sys.executable, str(platform / "runtime" / "fakes" / "directory" / "serve.py"), str(directory_port)],
-        env=env)]
+        None, env,
+    )]
 
     for name, entry in registry.items():
         if entry["kind"] != "web":
             continue
         app_env = dict(env, INSIGHTS_APP_MANIFEST=str(Path(entry["path"]) / "app.yaml"), INSIGHTS_APP=name)
-        procs.append(subprocess.Popen(
+        procs.append(_spawn(
+            name,
             [sys.executable, "-m", "uvicorn", "main:app", "--port", str(entry["port"]), "--log-level", "warning"],
-            cwd=Path(entry["path"]) / "src", env=app_env))
+            Path(entry["path"]) / "src", app_env,
+        ))
         print(f"  {name} on :{entry['port']}")
 
-    procs.append(subprocess.Popen(
+    procs.append(_spawn(
+        "edge",
         [sys.executable, "-m", "uvicorn", "runtime.edge.main:app", "--port", str(edge_port),
          "--log-level", "warning"],
-        cwd=platform, env=env))
+        platform, env,
+    ))
 
     # Wait for each app to bind before telling anyone the URLs. `up` used to return
     # as soon as the processes were spawned, so the very first curl in the README
@@ -493,16 +642,46 @@ def cmd_up(args) -> int:
 
     print(
         f"\nedge on http://localhost:{edge_port}\n"
-        f"  http://localhost:{edge_port}/a/headcount-dashboard/?as=krishna@corp.example\n"
-        f"  http://localhost:{edge_port}/a/headcount-dashboard/headcount?month=2026-09\n"
+        f"  the dashboard   http://localhost:{edge_port}/a/headcount-dashboard/?as=krishna@corp.example\n"
+        f"  who am I        http://localhost:{edge_port}/a/headcount-dashboard/api/me\n"
+        f"  the data        http://localhost:{edge_port}/a/headcount-dashboard/api/headcount?month=2026-09\n"
+        f"\n  the ?as= is only on the FIRST url - it stands in for the IdP redirect and sets\n"
+        f"  a session cookie. Without it every route returns 401, which is the point.\n"
+        f"\nlogs     insights logs --app headcount-dashboard --startup   (why it did or did not boot)\n"
+        f"         insights logs --app headcount-dashboard             (what it did once running)\n"
+        f"         insights logs --stream audit                        (every restricted-data read)\n"
         f"\nctrl-c to stop"
     )
+    # Tear the stack down on ANY exit, not just ctrl-c.
+    #
+    # This used to catch KeyboardInterrupt only, so `kill` on the parent - or any
+    # exception in here - left the directory stub, both app servers and the edge
+    # running and holding their ports. The next `insights up` then refused to start
+    # because 8080 was busy, blaming the user for processes it had orphaned itself.
+    # A supervisor that does not clean up is worse than no supervisor.
+    def _shutdown() -> None:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+        for proc in procs:                       # give each one a moment to go quietly
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        for handle in handles:
+            handle.close()
+
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))   # so `kill` reaches the finally
     try:
         while True:
+            if any(proc.poll() is not None for proc in procs):
+                print("\na process exited - shutting the rest of the stack down")
+                return 1
             time.sleep(1)
     except KeyboardInterrupt:
-        for proc in procs:
-            proc.terminate()
+        pass
+    finally:
+        _shutdown()
     return 0
 
 
@@ -557,6 +736,16 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade.set_defaults(func=cmd_upgrade_scaffold)
     sub.add_parser("datasets", help="what this app can read, and what it could ask for").set_defaults(func=cmd_datasets)
     sub.add_parser("status", help="every registered app").set_defaults(func=cmd_status)
+    logs = sub.add_parser("logs", help="process logs and telemetry for a local app")
+    logs.add_argument("--app", help="only this app")
+    logs.add_argument("--startup", action="store_true",
+                      help="the process log (uvicorn, import errors) instead of telemetry")
+    logs.add_argument("--stream", default="all", choices=("all", "events", "audit"))
+    logs.add_argument("--event", help="only this event name, e.g. dataset_read")
+    logs.add_argument("-n", "--lines", type=int, default=40)
+    logs.add_argument("--json", action="store_true", help="raw records, for piping to jq")
+    logs.set_defaults(func=cmd_logs)
+
     up = sub.add_parser("up", help="start the local platform")
     up.add_argument("--port", type=int, default=8080,
                     help="edge port (the stubs and apps take the next few). Default 8080")
@@ -567,16 +756,9 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--dataset", required=True)
     report.set_defaults(func=cmd_compliance_report)
 
-    access = sub.add_parser("access", help="request or approve access to a dataset")
-    access_sub = access.add_subparsers(dest="access_command", required=True)
-    req = access_sub.add_parser("request")
-    req.add_argument("--dataset", required=True)
-    req.add_argument("--reason", default="(no reason given)")
-    app_ = access_sub.add_parser("approve")
-    app_.add_argument("--dataset", required=True)
-    app_.add_argument("--app", required=True)
-    app_.add_argument("--approver", required=True)
-    app_.add_argument("--reason", default="")
+    access = sub.add_parser("access", help="show what to ask a data owner for, and who to ask")
+    access.add_argument("--dataset", help="default: everything this app declares")
+    access.add_argument("--reason", default="(state your reason here)")
     access.set_defaults(func=cmd_access)
 
     return parser

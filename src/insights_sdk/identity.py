@@ -34,6 +34,7 @@ class Caller:
     request_id: str
     trusted: bool
     _groups: tuple[str, ...] = field(default=(), repr=False)
+    is_service: bool = False
 
     @property
     def groups(self) -> tuple[str, ...]:
@@ -49,15 +50,15 @@ class Caller:
     def has_role(self, role: str) -> bool:
         return role in self.groups
 
-    @property
-    def is_service(self) -> bool:
-        """True for a scheduled run, which acts as the app rather than as a person.
-
-        The distinction matters at exactly one place - field masking - because a job has
-        no human whose corporate groups could answer "may this caller see salaries?".
-        See `data._effective_roles`.
-        """
-        return self.subject.startswith("svc:")
+    # `is_service` is a field set by whoever CONSTRUCTS the caller, not something
+    # inferred from the subject string. It used to be `subject.startswith("svc:")`,
+    # which quietly made the subject format load-bearing: rename the prefix and
+    # masking silently changes behaviour. Only the scheduler sets it, and only
+    # `Caller.service()` can.
+    #
+    # It matters at exactly one place - field masking - because a job has no human
+    # whose corporate groups could answer "may this caller see salaries?".
+    # See `broker._effective_roles`.
 
     @classmethod
     def anonymous(cls) -> "Caller":
@@ -72,7 +73,9 @@ class Caller:
         constructed it. Naming this explicitly matters: "who is the caller for a job?"
         is otherwise answered by accident.
         """
-        return cls(subject=subject, request_id=request_id, trusted=True, _groups=groups)
+        return cls(
+            subject=subject, request_id=request_id, trusted=True, _groups=groups, is_service=True
+        )
 
 
 _current: contextvars.ContextVar[Caller] = contextvars.ContextVar(

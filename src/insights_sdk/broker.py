@@ -40,16 +40,15 @@ def _verb_for(engine: str) -> str:
 
 
 def _effective_roles(caller: identity.Caller, grant: dict | None) -> tuple[str, ...]:
-    """Which roles this caller operates under, for field masking.
+    """Which roles apply, for LOCAL masking only.
 
-    A human's roles are their corporate groups, asserted by the edge. Simple.
+    In dev and prod this is unused: the data platform applies column masks and row
+    filters itself, per principal, on every path to the data. Locally there is no
+    data platform, so the registry's local_masking block is approximated against
+    whatever the local grant fixture says the identity may see.
 
-    A scheduled job has no human, so the question is "what may this APP see?" - and the
-    tempting answer, `access.roles` from the manifest, is wrong: that file lives in the
-    tenant's own repository, so a team could unmask compensation fields by editing a line
-    of their own YAML. Instead a service caller's extra roles come from the GRANT, which
-    only the dataset owner can write. The owner who said "yes, this app may read my data"
-    is also the one who says "and it may see these fields unmasked".
+    Note what is NOT consulted: the tenant's own manifest. It has no power over
+    data access at all - which is why there is nothing here to defend against.
     """
     roles = caller.groups
     if caller.is_service and grant:
@@ -74,13 +73,18 @@ def _authorize(alias: str, expected_engine: str) -> tuple[Manifest, identity.Cal
     caller = identity.require_trusted()                                     # 3  IDENTITY
     resolved = config.catalog().resolve(alias)                              # 4  RESOLVE
 
-    if resolved.restricted:                                                 # 5  GRANT
-        grant = config.grants().for_app(alias, manifest.app)
+    if resolved.restricted:                                                 # 5  VERIFY
+        # NOT an approval step. The data owner grants their data to this app's
+        # service identity in THEIR system; this checks that it happened, so the
+        # failure is legible here instead of a PERMISSION_DENIED at query time in
+        # production. In dev and prod the data platform would refuse us anyway -
+        # this just refuses earlier and says who to ask.
+        grant = config.grants().for_identity(alias, manifest.service_identity)
         if grant is None:
             raise EntitlementError(
-                f"'{alias}' is restricted. Declaring it is not enough - the dataset owner "
-                f"({resolved.dataset.owner}) must also grant it. Run "
-                f"`insights access request --dataset {alias}`."
+                f"'{alias}' has not been granted to {manifest.service_identity}. "
+                f"The platform cannot grant it - ask {resolved.dataset.owner}, who owns the "
+                f"data. Run `insights access` for the exact request to send them."
             )
         # Teach the logger what must never appear in telemetry from this process. The list
         # comes from the platform catalog, so a tenant cannot shorten it (ADR-003).

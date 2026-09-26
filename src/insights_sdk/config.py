@@ -170,9 +170,23 @@ class Manifest:
         return self.web.type if self.web else "none"
 
     @property
-    def service_subject(self) -> str:
-        """The identity a scheduled run acts as. Jobs have no interactive caller."""
-        return f"svc:{self.app}"
+    def service_identity(self) -> str:
+        """The service identity this app's unattended work runs as.
+
+        DERIVED from the registered app name - never read from a field a tenant
+        can edit. That is the whole of the platform's job for unattended work: a
+        team must not be able to make their job run as somebody else's identity
+        and inherit their data access.
+
+        This is the principal a data owner grants to, the one that appears in the
+        data platform's audit, AND the subject we stamp on our own telemetry. One
+        string, deliberately: a compliance reviewer joins our audit trail to Unity
+        Catalog's on a literal match. We used to write `svc:comp-report` in our logs
+        while the grant said `sp-comp-report`, which made the two trails joinable
+        only by someone who knew the renaming rule.
+        """
+        return f"sp-{self.app}"
+
 
 
 def _scan_forbidden(node: Any, where: str = "app.yaml") -> None:
@@ -480,6 +494,17 @@ def load_catalog(path: str | Path | None = None) -> Catalog:
 
 @dataclass(frozen=True)
 class Grants:
+    """What the DATA PLATFORM reports about access. Not an approval queue.
+
+    The platform approves nothing. A data owner grants their data to an app's
+    service identity in their own system - Unity Catalog, Snowflake roles, an API
+    key issued by whoever runs that service - and this is our read of that state,
+    used to fail early with a useful message instead of at query time in
+    production.
+
+    Locally this file stands in for that read, because there is no data platform
+    to ask. In dev and prod it is populated by querying the real one.
+    """
     grants: tuple[dict, ...]
     break_glass: tuple[dict, ...]
     path: Path
@@ -493,10 +518,17 @@ class Grants:
             return True                     # standing grant
         return at < datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
 
-    def for_app(self, dataset: str, app: str, at: datetime | None = None) -> dict | None:
+    def for_identity(self, dataset: str, identity: str, at: datetime | None = None) -> dict | None:
+        """Has the data owner granted this dataset to this service identity?
+
+        Keyed on the IDENTITY, not the app name, because that is what the data
+        platform actually grants to and what appears in its audit.
+        """
         at = at or now()
         for entry in self.grants:
-            if entry.get("dataset") == dataset and entry.get("app") == app and self._active(entry, at):
+            if (entry.get("dataset") == dataset
+                    and entry.get("identity") == identity
+                    and self._active(entry, at)):
                 return entry
         return None
 

@@ -58,8 +58,8 @@ def test_a_job_acts_as_itself(platform, as_app):
     from insights_sdk import config
 
     manifest = config.manifest()
-    service = identity.Caller.service(manifest.service_subject, manifest.owners, "run-1")
+    service = identity.Caller.service(manifest.service_identity, manifest.owners, "run-1")
 
-    assert service.subject == "svc:comp-report"
+    assert service.subject == "sp-comp-report"
     assert service.trusted is True
     assert "MG-PEOPLE-ANALYTICS" in service.groups

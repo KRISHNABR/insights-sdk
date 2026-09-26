@@ -89,7 +89,7 @@ require_role(role: str) -> Caller # raises AuthzError if the caller lacks the ro
 
 ```python
 class Caller:
-    subject: str          # "krishna@corp.example", or "svc:comp-report" for a scheduled run
+    subject: str          # "krishna@corp.example", or "sp-comp-report" for a scheduled run
     groups: tuple[str]    # EMPTY unless trusted — see below
     request_id: str
     trusted: bool
@@ -167,14 +167,15 @@ command that explains a rule — a rule that needs explaining is enforced in the
 |---|---|
 | `insights new-app NAME --kind web\|job --team T --owner GROUP` | Generate a new app repo: manifest, `pyproject.toml`, source stub, four CI workflows |
 | `insights doctor` | Everything CI will check, checked locally first — **the same code path**, so they cannot disagree |
-| `insights datasets` | What this app can read, and what it could request (name and owner only — not a data catalog) |
+| `insights datasets` | This app's service identity, what it declares, whether the data owner has granted it, and what else is registered (name and owner only — not a data catalog) |
 | `insights build --show` | Print the exact Dockerfile that would be built for this app |
 | `insights build` | Render it to `.insights/` and run `docker build` |
 | `insights run` | Run this app locally the way the platform runs it — same identity, same environment |
 | `insights up [--port N]` | Start the whole local platform: warehouse, REST stub, every app, the edge |
 | `insights status` | Every registered app: team, kind, SDK version, last seen |
-| `insights access request --dataset D` | Draft an access request for the **dataset owner** — we cannot approve it |
-| `insights access approve --dataset D --app A --approver P` | Record a grant (run by the dataset owner) |
+| `insights logs --app A --startup` | The **process** log: uvicorn output, import errors, tracebacks. Where an app that never came up explains itself |
+| `insights logs --app A [--stream audit] [--json]` | The **telemetry**: structured records the app emitted. Where a running app explains what it did, for whom, and how many rows |
+| `insights access [--dataset D]` | Print the access request to send and who to ask. There is no `approve` — the platform does not own the data |
 | `insights compliance-report --dataset D` | The artefact you hand a compliance reviewer |
 | `insights upgrade-scaffold [--check]` | Re-render the platform-owned files in this repo |
 

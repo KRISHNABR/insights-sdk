@@ -76,7 +76,7 @@ def test_a_job_sees_unmasked_fields_only_because_the_owner_granted_them(platform
     from insights_sdk import config, identity, telemetry
     as_app("app-job.yaml")
     manifest = config.manifest()
-    service = identity.Caller.service(manifest.service_subject, manifest.owners, "run-1")
+    service = identity.Caller.service(manifest.service_identity, manifest.owners, "run-1")
 
     assert "comp-analyst" not in service.groups          # not in the app's owner groups
 
@@ -104,7 +104,7 @@ def test_a_job_without_a_granted_role_is_still_masked(platform, as_app, monkeypa
     try:
         as_app("app-job.yaml")
         manifest = config.manifest()
-        service = identity.Caller.service(manifest.service_subject, manifest.owners, "run-2")
+        service = identity.Caller.service(manifest.service_identity, manifest.owners, "run-2")
         with identity.as_caller(service):
             rows = query("hr.compensation", "SELECT base_salary FROM hr.compensation")
         assert rows[0]["base_salary"] == "***"

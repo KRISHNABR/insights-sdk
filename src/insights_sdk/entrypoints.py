@@ -136,7 +136,7 @@ def run_job(fn: Callable[[], Any], *, run_id: str | None = None) -> int:
         raise ConfigError(f"{manifest.app} is declared kind: {manifest.kind}, not job")
 
     run_id = run_id or os.environ.get("INSIGHTS_RUN_ID") or f"run-{uuid.uuid4().hex[:10]}"
-    caller = identity.Caller.service(manifest.service_subject, manifest.owners, run_id)
+    caller = identity.Caller.service(manifest.service_identity, manifest.owners, run_id)
     log = telemetry.get_logger()
 
     draining = {"stop": False}
