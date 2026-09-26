@@ -24,6 +24,8 @@ from pathlib import Path
 #: the CI contract: a tenant gets pipeline improvements without editing anything, and
 #: a breaking change to the workflow interface means cutting v2.
 PLATFORM_REPO = os.environ.get("INSIGHTS_PLATFORM_REPO", "KRISHNABR/insights-platform")
+#: Where the SDK itself is fetched from until there is an internal package index.
+PLATFORM_ORG = os.environ.get("INSIGHTS_SDK_GIT", "https://github.com/KRISHNABR")
 PLATFORM_REF = os.environ.get("INSIGHTS_PLATFORM_REF", "v1")
 
 # --------------------------------------------------------------------------------
@@ -114,11 +116,17 @@ dev = ["pytest>=8.0"]
 [tool.uv]
 package = false
 
+# Where to FETCH the SDK. The version range above is the contract - a floor, not a
+# pin (ADR-001); this only says where a satisfying version comes from.
+#
+# With an internal package index, delete this block and configure the index once for
+# everyone. Until then the git tag stands in for it. `v1` MOVES: re-locking picks up
+# patches and minors, and a breaking change means cutting v2.
+#
+# Never a local path - you clone only this repo, so a path would resolve on the
+# platform team's machine and nowhere else.
 [tool.uv.sources]
-# LOCAL DEVELOPMENT ONLY - build against the SDK checkout beside this repo rather than
-# the last published release. Removed in a registry-backed environment, where the
-# version range above is the contract. See ADR-001.
-insights-sdk = {{ path = "../insights-sdk", editable = true }}
+insights-sdk = {{ git = "{PLATFORM_ORG}/insights-sdk.git", tag = "{PLATFORM_REF}" }}
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -411,7 +419,9 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
         Path("app.yaml"): MANIFEST.format(
             name=name, team=team, kind=kind, owner=owner, base=base, kind_block=kind_block
         ),
-        Path("pyproject.toml"): PYPROJECT.format(name=name),
+        Path("pyproject.toml"): PYPROJECT.format(
+            name=name, PLATFORM_ORG=PLATFORM_ORG, PLATFORM_REF=PLATFORM_REF
+        ),
         Path("src/main.py"): (JOB_MAIN if kind == "job" else WEB_MAIN).format(name=name),
         Path("README.md"): README.format(name=name, kind=kind, team=team),
         Path(".gitignore"): GITIGNORE,
