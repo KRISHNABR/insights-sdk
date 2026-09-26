@@ -153,7 +153,8 @@ def test_a_tenant_cannot_state_a_classification_at_any_depth(platform, tmp_path)
     levels deep must not get it past, which is why the scanner recurses."""
     for body in (
         {**BASE_WEB, "web": {"route": "/x", "type": "spa", "classification": "internal"}},
-        {**BASE_WEB, "environments": {"prod": {"meta": {"classification": "public"}}}},
+        {**BASE_WEB, "connections": [{"name": "w", "engine": "sqlite", "path": "/tmp/w.db",
+                                      "local": {"engine": "sqlite", "classification": "public"}}]},
     ):
         with pytest.raises(ManifestError, match="classification"):
             config.load_manifest(write(tmp_path, body))
@@ -209,3 +210,69 @@ def test_the_sdk_floor_gate_can_actually_fail(platform, tmp_path, monkeypatch):
     assert run(">=0.1,<1") == 0         # supported
     assert run(">=9.9,<10") != 0        # no supported version satisfies it
     assert run("==0.1.0") != 0          # a pin freezes the app; uv.lock is what pins
+
+
+# --- the local override -------------------------------------------------------
+
+def test_a_local_block_applies_only_in_the_local_environment(platform, tmp_path, monkeypatch):
+    """One manifest describes production; `local:` is the laptop stand-in.
+
+    Scoped to exactly one environment on purpose - if it could vary dev from prod it
+    would be a machine for producing "it worked in dev".
+    """
+    body = {**BASE_WEB, "connections": [{
+        "name": "w", "engine": "databricks-sql", "host": "adb.example.net",
+        "http_path": "/sql/1.0/x", "timeout": 30, "secret": "w-token",
+        "local": {"engine": "sqlite", "path": "/tmp/w.db"},
+    }]}
+    path = write(tmp_path, body)
+
+    monkeypatch.setenv("INSIGHTS_ENV", "prod")
+    config.reset()
+    prod = config.load_manifest(path).connections[0]
+    assert prod.engine == "databricks-sql"
+    assert prod.options["host"] == "adb.example.net"
+    assert "path" not in prod.options
+
+    monkeypatch.setenv("INSIGHTS_ENV", "local")
+    config.reset()
+    local = config.load_manifest(path).connections[0]
+    assert local.engine == "sqlite"
+    assert local.options["path"] == "/tmp/w.db"
+    # a sqlite file and a production host are alternatives, not a pair
+    assert "host" not in local.options
+
+
+def test_a_local_block_merges_rather_than_replaces(platform, tmp_path, monkeypatch):
+    """A field the override does not name is inherited - so a local run still
+    resolves the same secret, and therefore still exercises the credential path."""
+    body = {**BASE_WEB, "connections": [{
+        "name": "w", "engine": "postgres", "host": "db.internal", "timeout": 45,
+        "secret": "w-token", "local": {"engine": "sqlite", "path": "/tmp/w.db"},
+    }]}
+    monkeypatch.setenv("INSIGHTS_ENV", "local")
+    config.reset()
+    local = config.load_manifest(write(tmp_path, body)).connections[0]
+
+    assert local.secret == "w-token", "the secret must be inherited, not dropped"
+    assert local.options["timeout"] == 45
+
+
+def test_a_credential_in_a_local_block_is_still_refused(platform, tmp_path, monkeypatch):
+    """A local credential is still a credential in git."""
+    body = {**BASE_WEB, "connections": [{
+        "name": "w", "engine": "postgres", "host": "db.internal",
+        "local": {"engine": "sqlite", "path": "/tmp/w.db", "password": "hunter2"},
+    }]}
+    monkeypatch.setenv("INSIGHTS_ENV", "local")
+    config.reset()
+    with pytest.raises(ManifestError, match="password"):
+        config.load_manifest(write(tmp_path, body))
+
+
+def test_the_environments_block_is_refused(platform, tmp_path):
+    """Nothing ever read it. The approval gate is a GitHub environment whose reviewers
+    come from access.manage, and 'automatic' is which workflow exists."""
+    body = {**BASE_WEB, "environments": {"prod": {"approvers": "owners"}}}
+    with pytest.raises(ManifestError, match="environments"):
+        config.load_manifest(write(tmp_path, body))

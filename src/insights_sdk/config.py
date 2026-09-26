@@ -34,10 +34,12 @@ _ALLOWED_TOP = {
     "access",        # who manages the app, and who may use it
     "runtime",       # base image, size, sdk floor
     "connections",   # engine, host and a secret NAME. Never a credential
+    # Listed only so the dedicated refusal below fires instead of a generic
+    # "unknown key" - a removed field deserves a message saying where it went.
+    "environments",
     "web",           # kind: web  - route, type, health
     "job",           # kind: job  - schedule, timeout, retries, concurrency...
     "outputs",       # what a job produces
-    "environments",  # dev / uat / prod, and who approves each
 }
 
 # Words that describe MECHANISM. A manifest declares intent, never mechanism - so these
@@ -171,7 +173,6 @@ class Manifest:
     web: WebSpec | None
     job: JobSpec | None
     outputs: tuple[dict, ...]
-    environments: dict
     path: Path
 
     @property
@@ -249,13 +250,49 @@ def _parse_connection(entry: dict, target: Path) -> "ConnectionSpec":
     # environment the app will run in. Expanding here made the gate fail on a
     # perfectly valid manifest because CI had not exported a variable that only
     # matters at runtime.
-    options = {k: v for k, v in entry.items() if k not in ("name", "engine", "type", "secret")}
-    return ConnectionSpec(
-        name=name,
-        engine=engine,
-        secret=(str(entry["secret"]) if entry.get("secret") else None),
-        options=options,
-    )
+    options = {k: v for k, v in entry.items()
+               if k not in ("name", "engine", "type", "secret", "local")}
+    secret = str(entry["secret"]) if entry.get("secret") else None
+
+    # A `local:` block replaces the connection when INSIGHTS_ENV=local, and only then.
+    #
+    # It exists because there is no Databricks on a laptop. Without it a manifest
+    # either describes production and cannot run locally, or describes the laptop and
+    # is a lie about production - and the previous version did the latter, with a
+    # relative path to a sibling repo baked into a tenant's contract.
+    #
+    # Scoped to exactly one environment on purpose: it cannot be used to vary dev
+    # from prod, which is where "it worked in dev" comes from.
+    override = entry.get("local")
+    if override is not None and env() == "local":
+        if not isinstance(override, dict):
+            raise ManifestError(f"{target}: connection '{name}': `local:` must be a block")
+        engine = override.get("engine", engine)
+        if engine not in SUPPORTED_ENGINES:
+            raise ManifestError(
+                f"{target}: connection '{name}' local override has engine {engine!r}. "
+                f"Supported: {', '.join(SUPPORTED_ENGINES)}."
+            )
+        leaked = sorted(k for k in override if str(k).lower() in _FORBIDDEN_IN_CONNECTIONS)
+        if leaked:
+            raise ManifestError(
+                f"{target}: connection '{name}' local override contains {', '.join(leaked)}. "
+                f"A local credential is still a credential in git."
+            )
+        # MERGE, do not replace. A field the override does not name is inherited,
+        # so a local run still resolves the same secret and still exercises the
+        # credential path - which is the half of the connection most likely to be
+        # wrong in production and least likely to be tested if local skips it.
+        if "secret" in override:
+            secret = str(override["secret"]) if override["secret"] else None
+        options = {**options, **{k: v for k, v in override.items()
+                                 if k not in ("engine", "secret")}}
+        # A local sqlite file and a production host are alternatives, not a pair.
+        if override.get("engine") == "sqlite":
+            options.pop("host", None)
+            options.pop("http_path", None)
+
+    return ConnectionSpec(name=name, engine=engine, secret=secret, options=options)
 
 
 def _scan_forbidden(node: Any, where: str = "app.yaml") -> None:
@@ -340,6 +377,15 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
                 f"individuals leave, and an app owned by someone who left is an orphan."
             )
 
+    if raw.get("environments"):
+        raise ManifestError(
+            f"{target}: `environments:` was removed. It said who approves a deploy and "
+            f"whether one is automatic - both of which are already true elsewhere: the "
+            f"approval gate is a GitHub environment whose reviewers the platform "
+            f"reconciles from `access.manage`, and 'automatic' is simply which of the "
+            f"three deploy workflows exists. Nothing ever read this block."
+        )
+
     if access.get("roles"):
         raise ManifestError(
             f"{target}: `access.roles` was removed. This platform has exactly three "
@@ -419,7 +465,6 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
         web=web,
         job=job,
         outputs=tuple(raw.get("outputs") or ()),
-        environments=raw.get("environments") or {},
         path=target,
     )
 

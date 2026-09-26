@@ -69,10 +69,6 @@ runtime:
 #   rows = connect("my-warehouse").query("SELECT ...")
 connections: []
 {kind_block}
-environments:
-  dev:  {{auto_deploy: true}}
-  uat:  {{auto_deploy: false, approvers: contributors}}
-  prod: {{auto_deploy: false, approvers: owners}}
 """
 
 WEB_BLOCK = """

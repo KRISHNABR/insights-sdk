@@ -607,6 +607,7 @@ def cmd_up(args) -> int:
         # The local stand-in for AWS Secrets Manager. Same path shape, same
         # per-app scoping; only the thing enforcing it differs.
         INSIGHTS_SECRET_DIR=str(platform / "runtime" / "fakes" / "secret-store"),
+        INSIGHTS_WAREHOUSE_PATH=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         # In production these come from the base image. Locally the four repos are
         # not installed, so the CLI points at the same files the image would carry.
         INSIGHTS_TEMPLATES=str(platform / "runtime" / "base-image" / "design-system"),
@@ -742,6 +743,7 @@ def cmd_run(args) -> int:
         # The local stand-in for AWS Secrets Manager. Same path shape, same
         # per-app scoping; only the thing enforcing it differs.
         INSIGHTS_SECRET_DIR=str(platform / "runtime" / "fakes" / "secret-store"),
+        INSIGHTS_WAREHOUSE_PATH=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         INSIGHTS_APP_MANIFEST=str(manifest.path),
         INSIGHTS_APP=manifest.app,
         INSIGHTS_TEMPLATES=str(platform / "runtime" / "base-image" / "design-system"),
@@ -837,6 +839,8 @@ def _local_defaults() -> None:
         ("INSIGHTS_REGISTRY_DIR", str(_registry())),
         ("INSIGHTS_SECRET_DIR", str(platform / "runtime" / "fakes" / "secret-store")),
         ("INSIGHTS_DIRECTORY_URL", "http://127.0.0.1:8081"),
+        ("INSIGHTS_WAREHOUSE_PATH",
+         str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db")),
         ("INSIGHTS_SINK_DIR", str(_sink_dir())),
         ("INSIGHTS_OUTPUT_DIR", str(platform / "runtime" / "outputs")),
     ):
