@@ -584,10 +584,13 @@ def cmd_up(args) -> int:
     # Check before starting anything. A half-started stack that fails on the third
     # process is worse than a clear refusal, and 8080 is a popular port.
     edge_port, directory_port = args.port, args.port + 1
-    for label, port in (("edge", edge_port), ("directory stub", directory_port)):
-        if not _port_free(port):
-            print(f"port {port} ({label}) is already in use. Try `insights up --port 9000`.")
-            return 1
+    if not _port_free(edge_port):
+        print(f"port {edge_port} (edge) is already in use. Try `insights up --port 9000`.")
+        return 1
+    if not _port_free(directory_port):
+        print(f"port {directory_port} (directory stub) is already in use. "
+              f"Try `insights up --port 9000`.")
+        return 1
     sys.path.insert(0, str(platform))
 
     # 1. seed the stub warehouse (idempotent)
@@ -634,6 +637,22 @@ def cmd_up(args) -> int:
     # connections` agree with the stack that is running. environments.yaml can only
     # hold a default port, and `up --port 9000` moves every stub - which silently
     # pointed `run` at a directory API that was not there.
+    # Check the APP ports too, before spawning anything.
+    #
+    # Only the edge and the stub were checked, so a busy app port produced a
+    # half-started stack and "X did not become healthy" - which reads like the app is
+    # broken. The cause was one line down in its startup log, but the message pointed
+    # at `insights doctor`, which would have said the app is fine. Refuse up front and
+    # name the port instead.
+    taken = [(name, entry["port"]) for name, entry in registry.items()
+             if entry.get("port") and not _port_free(entry["port"])]
+    if taken:
+        for name, port in taken:
+            print(f"port {port} ({name}) is already in use.")
+        print(f"\nAnother `insights up` is probably still running. Stop it, or start "
+              f"this one elsewhere:\n\n    insights up --port {args.port + 100}")
+        return 1
+
     (_registry() / "env.local.json").write_text(json.dumps({
         "INSIGHTS_DIRECTORY_URL": f"http://127.0.0.1:{directory_port}",
     }, indent=2) + "\n")
