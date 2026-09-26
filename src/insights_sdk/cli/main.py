@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import __version__, config
-from ..data import _sensitivity
+from ..broker import _sensitivity
 from ..errors import InsightsError
 from . import scaffold
 
