@@ -2,7 +2,7 @@
 
 A tenant's whole surface area is here:
 
-    from insights_sdk import web_app, job, query, fetch, get_logger, current_user, require_role
+    from insights_sdk import web_app, job, connect, get_logger, current_user, require_role
 
 Anything not exported from this module is platform internals and may change in a minor
 release. Anything exported is covered by the support window in ADR-001.
@@ -17,6 +17,8 @@ SUPPORTED_VERSIONS = ("0.1.0",)
 
 from .entrypoints import job, run_job, web_app  # noqa: E402
 from .broker import fetch, query  # noqa: E402
+from .connectors import ConnectionFailed, connect  # noqa: E402
+from .secrets import SecretError  # noqa: E402
 from .identity import Caller, current_user, require_role, require_trusted  # noqa: E402
 from .telemetry import get_logger  # noqa: E402
 from .outputs import output  # noqa: E402
@@ -38,6 +40,7 @@ __all__ = [
     "run_job",
     "query",
     "fetch",
+    "connect",
     "get_logger",
     "output",
     "current_user",
@@ -52,4 +55,6 @@ __all__ = [
     "AuthzError",
     "RedactionError",
     "UnknownDatasetError",
+    "ConnectionFailed",
+    "SecretError",
 ]

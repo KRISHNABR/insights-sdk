@@ -28,7 +28,8 @@ _ALLOWED_TOP = {
     "apiVersion", "app", "team", "kind",
     "access",        # who manages the app, and who may use it
     "runtime",       # base image, size, sdk floor
-    "data",          # dataset names
+    "data",          # dataset names - the older brokered model, still supported
+    "connections",   # engine, host and a secret NAME. Never a credential
     "web",           # kind: web  - route, type, health
     "job",           # kind: job  - schedule, timeout, retries, concurrency...
     "outputs",       # what a job produces
@@ -40,14 +41,23 @@ _ALLOWED_TOP = {
 # structural: a tenant cannot pin a table, choose an engine, smuggle in a DSN, or
 # downgrade a classification, because the loader refuses the file.
 _FORBIDDEN_ANYWHERE = {
-    "classification",  # ADR-002 s4 - sensitivity is the catalog's to state
-    "connection",      # ADR-002 s2 - nobody is granted a connection
-    "engine",
-    "credential",
-    "secret",
-    "dsn",
-    "table",
-    "host",
+    "classification",  # ADR-002 s4 - sensitivity is the data platform's to state
+    "credential",      # a value, in a file that lives in git forever
+    "dsn",             # a connection string is usually a credential wearing a hat
+}
+
+#: Keys that are forbidden under `data:` but REQUIRED under `connections:`.
+#:
+#: The two blocks come from opposite models and the same word means opposite things
+#: in each. Under `data:` a team names a dataset and the platform decides how to
+#: reach it, so `engine` and `host` there are a tenant overriding the platform's
+#: mechanism. Under `connections:` the team owns the connection, so those are simply
+#: the connection - and refusing them would refuse the whole feature.
+#:
+#: Worth stating plainly because a single flat "forbidden everywhere" list is what
+#: made this wrong: it read as a security rule when it was really a coupling rule.
+_FORBIDDEN_UNDER_DATA = {
+    "connection", "engine", "secret", "table", "host", "port", "database",
 }
 
 
@@ -132,6 +142,22 @@ class WebSpec:
 
 
 @dataclass(frozen=True)
+class ConnectionSpec:
+    """A connection a team declared. Config, never a credential.
+
+    `secret` is a NAME, not a value. The manifest is in git; a value here would be a
+    value in git forever, and no amount of rotation gets it back out of the history.
+    The loader refuses anything that looks like it went in by accident - see
+    `_FORBIDDEN_IN_CONNECTIONS`.
+    """
+
+    name: str
+    engine: str
+    secret: str | None
+    options: dict                         # host, http_path, database, base_url, timeout...
+
+
+@dataclass(frozen=True)
 class Manifest:
     app: str
     team: str
@@ -143,6 +169,7 @@ class Manifest:
     size: str
     system_packages: tuple[str, ...]
     datasets: tuple[DatasetRequest, ...]
+    connections: tuple[ConnectionSpec, ...]
     web: WebSpec | None
     job: JobSpec | None
     outputs: tuple[dict, ...]
@@ -189,18 +216,76 @@ class Manifest:
 
 
 
-def _scan_forbidden(node: Any, where: str = "app.yaml") -> None:
+#: Keys that must never appear on a connection. Each one is a credential someone
+#: pasted in while debugging and meant to remove. The manifest is in git, so "meant
+#: to" is not good enough: refuse the file rather than accept the commit.
+_FORBIDDEN_IN_CONNECTIONS = {
+    "password", "passwd", "pwd", "token", "access_token", "api_key", "apikey",
+    "client_secret", "secret_key", "private_key", "credential", "credentials",
+    "connection_string", "dsn", "sas_token", "account_key",
+}
+
+
+def _parse_connection(entry: dict, target: Path) -> "ConnectionSpec":
+    from .connectors import SUPPORTED_ENGINES
+
+    if not isinstance(entry, dict) or "name" not in entry:
+        raise ManifestError(f"{target}: every entry under `connections:` needs a `name`")
+    name = str(entry["name"])
+
+    engine = entry.get("engine") or entry.get("type")
+    if engine not in SUPPORTED_ENGINES:
+        raise ManifestError(
+            f"{target}: connection '{name}' has engine {engine!r}. "
+            f"Supported: {', '.join(SUPPORTED_ENGINES)}. Adding one is a platform "
+            f"change - a driver in the base image and an entry here - so ask rather "
+            f"than working around it."
+        )
+
+    leaked = sorted(k for k in entry if str(k).lower() in _FORBIDDEN_IN_CONNECTIONS)
+    if leaked:
+        raise ManifestError(
+            f"{target}: connection '{name}' contains {', '.join(leaked)}. "
+            f"app.yaml is in git - a credential here is a credential in the history "
+            f"forever. Use `secret: <name>` and put the value in the secret store, "
+            f"which the platform team cannot read."
+        )
+
+    options = {k: v for k, v in entry.items() if k not in ("name", "engine", "type", "secret")}
+    return ConnectionSpec(
+        name=name,
+        engine=engine,
+        secret=(str(entry["secret"]) if entry.get("secret") else None),
+        options=options,
+    )
+
+
+def _scan_forbidden(node: Any, where: str = "app.yaml", *, under_data: bool = False) -> None:
+    """Refuse keys a tenant must not set, at any depth.
+
+    `classification` is the one that matters most: a tenant marking their own data
+    non-sensitive is the whole reason this scanner exists, and nesting it three levels
+    deep must not get it past.
+    """
     if isinstance(node, dict):
         for key, value in node.items():
-            if str(key).lower() in _FORBIDDEN_ANYWHERE:
+            lowered = str(key).lower()
+            if lowered in _FORBIDDEN_ANYWHERE:
                 raise ManifestError(
                     f"{where}: '{key}' may not appear in a tenant manifest. "
-                    f"A manifest declares intent; the platform catalog decides mechanism."
+                    f"Sensitivity is the data platform's to state, and a credential "
+                    f"belongs in the secret store - app.yaml is in git."
                 )
-            _scan_forbidden(value, f"{where}:{key}")
+            if under_data and lowered in _FORBIDDEN_UNDER_DATA:
+                raise ManifestError(
+                    f"{where}: '{key}' may not appear under `data:`. That block names a "
+                    f"dataset and lets the platform resolve it. To own the connection "
+                    f"yourself, declare it under `connections:` instead."
+                )
+            _scan_forbidden(value, f"{where}:{key}", under_data=under_data or lowered == "data")
     elif isinstance(node, list):
         for item in node:
-            _scan_forbidden(item, where)
+            _scan_forbidden(item, where, under_data=under_data)
 
 
 def _find_manifest() -> Path:
@@ -332,6 +417,8 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
         for d in (raw.get("data") or [])
     )
 
+    connections = tuple(_parse_connection(entry, target) for entry in (raw.get("connections") or []))
+
     return Manifest(
         app=raw["app"],
         team=raw["team"],
@@ -343,6 +430,7 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
         size=runtime.get("size", "small"),
         system_packages=tuple(runtime.get("system_packages") or ()),
         datasets=datasets,
+        connections=connections,
         web=web,
         job=job,
         outputs=tuple(raw.get("outputs") or ()),
