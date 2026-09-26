@@ -1,0 +1,10 @@
+apiVersion: v1
+app: headcount-dashboard
+team: people-ops
+kind: web
+owners: [MG-PEOPLE-OPS]
+runtime: {sdk: ">=0.1,<1"}
+data:
+  - {dataset: hr.headcount, access: read}
+  - {dataset: directory.people, access: read}
+access: {roles: [headcount-viewer]}

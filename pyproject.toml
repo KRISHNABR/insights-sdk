@@ -1,0 +1,30 @@
+[project]
+name = "insights-sdk"
+version = "0.1.0"
+description = "The Insights Hub platform SDK. Everything a tenant app inherits."
+requires-python = ">=3.11"
+dependencies = [
+  "pyyaml>=6.0",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "httpx>=0.27",
+]
+
+# The CLI ships INSIDE the SDK on purpose (ADR-001): a tenant installs one thing,
+# and the scaffold can never skew from the library version that scaffolded it.
+[project.scripts]
+insights = "insights_sdk.cli.main:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/insights_sdk"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

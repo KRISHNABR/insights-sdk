@@ -1,0 +1,205 @@
+"""The data broker - the single path from a tenant app to any shared connection.
+
+    rows   = query("hr.headcount", "SELECT dept, headcount FROM hr.headcount", ...)
+    people = fetch("directory.people", params={"dept": "Engineering"})
+
+That is the entire data API. There is no `connect()`, no cursor, no engine selection and
+no exported way to obtain a connection - on purpose, and the test suite asserts it stays
+that way.
+
+Every control in the platform (entitlement, the two-key grant, masking, audit, the
+telemetry field assertions) is enforceable only because there is exactly ONE code path
+to data. Hand out a connection and all of them become advisory. See ADR-002.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from typing import Any
+
+from . import config, engines, identity, obs
+from .config import Manifest, Resolved
+from .errors import EntitlementError, InsightsError
+
+MASK = "***"
+
+
+def _verb_for(engine: str) -> str:
+    return {"warehouse": "query()", "rest": "fetch()"}.get(engine, engine)
+
+
+def _effective_roles(caller: identity.Caller, grant: dict | None) -> tuple[str, ...]:
+    """Which roles this caller operates under, for field masking.
+
+    A human's roles are their corporate groups, asserted by the edge. Simple.
+
+    A scheduled job has no human, so the question is "what may this APP see?" - and the
+    tempting answer, `access.roles` from the manifest, is wrong: that file lives in the
+    tenant's own repository, so a team could unmask compensation fields by editing a line
+    of their own YAML. Instead a service caller's extra roles come from the GRANT, which
+    only the dataset owner can write. The owner who said "yes, this app may read my data"
+    is also the one who says "and it may see these fields unmasked".
+    """
+    roles = caller.groups
+    if caller.is_service and grant:
+        roles = roles + tuple(grant.get("roles") or ())
+    return roles
+
+
+def _authorize(alias: str, expected_engine: str) -> tuple[Manifest, identity.Caller, Resolved, dict | None]:
+    """Steps 1-5. Everything that must be true before a byte is read.
+
+    Shared by every engine, which is why adding an engine cannot accidentally skip a check.
+    """
+    manifest = config.manifest()                                            # 1
+    grant: dict | None = None
+
+    if not manifest.declares(alias):                                        # 2  ENTITLEMENT
+        raise EntitlementError(
+            f"'{manifest.app}' is not entitled to '{alias}'. Add it to the `data:` block of "
+            f"app.yaml and redeploy. Knowing a dataset's name is not access."
+        )
+
+    caller = identity.require_trusted()                                     # 3  IDENTITY
+    resolved = config.catalog().resolve(alias)                              # 4  RESOLVE
+
+    if resolved.restricted:                                                 # 5  GRANT
+        grant = config.grants().for_app(alias, manifest.app)
+        if grant is None:
+            raise EntitlementError(
+                f"'{alias}' is restricted. Declaring it is not enough - the dataset owner "
+                f"({resolved.dataset.owner}) must also grant it. Run "
+                f"`insights access request --dataset {alias}`."
+            )
+        # Teach the logger what must never appear in telemetry from this process. The list
+        # comes from the platform catalog, so a tenant cannot shorten it (ADR-003).
+        obs.register_sensitive_fields(alias, resolved.dataset.sensitive_fields)
+
+    if resolved.connection.engine != expected_engine:
+        raise InsightsError(
+            f"'{alias}' lives on a {resolved.connection.engine} connection - use "
+            f"{_verb_for(resolved.connection.engine)}, not {_verb_for(expected_engine)}."
+        )
+    return manifest, caller, resolved, grant
+
+
+def _rewrite_and_scope(sql: str, alias: str, resolved: Resolved) -> str:
+    """Step 6. Substitute the physical name, and refuse SQL that reaches past the declaration.
+
+    The rewrite is what makes tenant SQL portable: `hr.headcount` is one table locally and
+    another in production, and the app never learns that.
+
+    The scope check closes the obvious hole - declare a harmless dataset, then select from
+    a physical table you were never granted. It is not airtight (SQL built at runtime can
+    evade it) and it does not need to be: the threat model here is accident, and the
+    accident this prevents is a copy-pasted query silently reading the wrong table.
+    """
+    token = re.compile(r"(?<![\w.])" + re.escape(alias) + r"(?![\w.])")
+    if not token.search(sql):
+        raise EntitlementError(
+            f"your SQL does not reference '{alias}', the dataset you named. Query the alias "
+            f"directly - the platform substitutes the physical table for this environment."
+        )
+    physical = resolved.location["table"]
+    rewritten = token.sub(physical, sql)
+
+    catalog = config.catalog()
+    for other_name, other in catalog.datasets.items():
+        if other_name == alias:
+            continue
+        other_physical = (other.locations.get(resolved.env) or {}).get("table")
+        for needle in filter(None, (other_name, other_physical)):
+            if re.search(r"(?<![\w.])" + re.escape(needle) + r"(?![\w.])", rewritten):
+                raise EntitlementError(
+                    f"this query reaches '{needle}', which belongs to dataset '{other_name}'. "
+                    f"One query, one declared dataset."
+                )
+    return rewritten
+
+
+def _mask(rows: list[dict], resolved: Resolved, roles: tuple[str, ...]) -> tuple[list[dict], int]:
+    """Step 8. Hide fields this caller's roles do not permit.
+
+    Masking rather than omission, deliberately: an app that gets a column back as `***`
+    keeps working and its author learns the column exists but is not for them. A column
+    that silently vanishes produces a confusing bug report instead of a clear one.
+    """
+    rules = resolved.dataset.masking
+    if not rules or not rows:
+        return rows, 0
+    hidden = [field for field, role in rules.items() if role not in roles]
+    if not hidden:
+        return rows, 0
+    masked = [{k: (MASK if k in hidden else v) for k, v in row.items()} for row in rows]
+    present = [f for f in hidden if f in rows[0]]
+    return masked, len(present)
+
+
+def _execute(alias: str, expected_engine: str, request: Any, sql_for_rewrite: str | None = None) -> list[dict]:
+    manifest, caller, resolved, grant = _authorize(alias, expected_engine)
+    roles = _effective_roles(caller, grant)
+
+    if sql_for_rewrite is not None:                                         # 6
+        sql = _rewrite_and_scope(sql_for_rewrite, alias, resolved)
+        request = (sql, request)
+
+    started = time.perf_counter()
+    rows = engines.engine_for(resolved).run(resolved, request)              # 7
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+    rows, masked_count = _mask(rows, resolved, roles)                       # 8
+
+    obs.audit_read(                                                         # 9
+        dataset=alias,
+        classification=resolved.dataset.classification,
+        owner=resolved.dataset.owner,
+        connection=resolved.connection.name,
+        rows=len(rows),
+        ms=elapsed_ms,
+        masked_fields=masked_count,
+        via_grant=bool(grant) and caller.is_service,
+    )
+    return rows
+
+
+def query(dataset: str, sql: str, **params: Any) -> list[dict]:
+    """Read from a warehouse-backed dataset.
+
+    Write SQL against the dataset ALIAS - the platform substitutes the physical table for
+    whichever environment this is, so the same query works everywhere. Bind values with
+    named parameters (`:month`); never format them into the string.
+    """
+    return _execute(dataset, "warehouse", params, sql_for_rewrite=sql)
+
+
+def fetch(dataset: str, *, params: dict[str, Any] | None = None) -> list[dict]:
+    """Read from a REST-backed dataset.
+
+    The resource path is resolved from the catalog, not passed in: the dataset names the
+    thing, the platform knows where it lives in this environment. Always a list of dicts,
+    so masking and auditing are identical code for both engines.
+    """
+    manifest, caller, resolved, grant = _authorize(dataset, "rest")
+    roles = _effective_roles(caller, grant)
+    resource = resolved.location["resource"]
+
+    started = time.perf_counter()
+    rows = engines.engine_for(resolved).run(resolved, (resource, params or {}))
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+    rows, masked_count = _mask(rows, resolved, roles)
+    obs.audit_read(
+        dataset=dataset,
+        classification=resolved.dataset.classification,
+        owner=resolved.dataset.owner,
+        connection=resolved.connection.name,
+        rows=len(rows),
+        ms=elapsed_ms,
+        masked_fields=masked_count,
+        via_grant=bool(grant) and caller.is_service,
+    )
+    return rows
+
+
+__all__ = ["query", "fetch"]
