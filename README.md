@@ -207,7 +207,7 @@ flowchart TB
 ## Tests
 
 ```bash
-uv run --with pytest --with pyyaml --with fastapi python -m pytest -q     # 55 tests
+uv run --with pytest --with pyyaml --with fastapi python -m pytest -q     # 60 test cases
 ```
 
 None of these are unit tests for their own sake. Each turns a claim in an ADR into evidence.

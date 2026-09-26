@@ -13,7 +13,18 @@ exactly the files listed in PLATFORM_OWNED and touches nothing else.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+#: Where the reusable workflows live. Generated CI points here, so it must be real -
+#: an earlier version hard-coded an org that does not exist, and every tenant's very
+#: first Actions run failed at workflow resolution before running a single step.
+#:
+#: `@v1` is a MOVING major tag, which is ADR-001's floor-not-pin argument applied to
+#: the CI contract: a tenant gets pipeline improvements without editing anything, and
+#: a breaking change to the workflow interface means cutting v2.
+PLATFORM_REPO = os.environ.get("INSIGHTS_PLATFORM_REPO", "KRISHNABR/insights-platform")
+PLATFORM_REF = os.environ.get("INSIGHTS_PLATFORM_REF", "v1")
 
 # --------------------------------------------------------------------------------
 # What a new app gets
@@ -172,7 +183,7 @@ on:
 
 jobs:
   ci:
-    uses: insights-hub/insights-platform/.github/workflows/ci.yml@v1
+    uses: {PLATFORM_REPO}/.github/workflows/ci.yml@{PLATFORM_REF}
     with:
       app: {name}
 """
@@ -190,7 +201,7 @@ on:
 
 jobs:
   deploy:
-    uses: insights-hub/insights-platform/.github/workflows/deploy.yml@v1
+    uses: {PLATFORM_REPO}/.github/workflows/deploy.yml@{PLATFORM_REF}
     with:
       app: {name}
       environment: dev
@@ -213,7 +224,7 @@ on:
 
 jobs:
   deploy:
-    uses: insights-hub/insights-platform/.github/workflows/deploy.yml@v1
+    uses: {PLATFORM_REPO}/.github/workflows/deploy.yml@{PLATFORM_REF}
     with:
       app: {name}
       environment: uat
@@ -237,7 +248,7 @@ on:
 
 jobs:
   deploy:
-    uses: insights-hub/insights-platform/.github/workflows/deploy.yml@v1
+    uses: {PLATFORM_REPO}/.github/workflows/deploy.yml@{PLATFORM_REF}
     with:
       app: {name}
       environment: prod
@@ -318,7 +329,6 @@ BASE_VERSIONS = {
     "python-web": "0.1",
     "python-data": "0.1",
     "python-min": "0.1",
-    "python-streamlit": "0.1",
 }
 
 
@@ -377,10 +387,10 @@ PLATFORM_OWNED = (
 
 def render_platform_owned(name: str) -> dict[Path, str]:
     return {
-        Path(".github/workflows/ci.yml"): CI.format(name=name),
-        Path(".github/workflows/deploy-dev.yml"): DEPLOY_DEV.format(name=name),
-        Path(".github/workflows/deploy-uat.yml"): DEPLOY_UAT.format(name=name),
-        Path(".github/workflows/deploy-prod.yml"): DEPLOY_PROD.format(name=name),
+        Path(".github/workflows/ci.yml"): CI.format(name=name, PLATFORM_REPO=PLATFORM_REPO, PLATFORM_REF=PLATFORM_REF),
+        Path(".github/workflows/deploy-dev.yml"): DEPLOY_DEV.format(name=name, PLATFORM_REPO=PLATFORM_REPO, PLATFORM_REF=PLATFORM_REF),
+        Path(".github/workflows/deploy-uat.yml"): DEPLOY_UAT.format(name=name, PLATFORM_REPO=PLATFORM_REPO, PLATFORM_REF=PLATFORM_REF),
+        Path(".github/workflows/deploy-prod.yml"): DEPLOY_PROD.format(name=name, PLATFORM_REPO=PLATFORM_REPO, PLATFORM_REF=PLATFORM_REF),
     }
 
 

@@ -5,6 +5,8 @@ parses but means something different from what the author intended is worse than
 one that fails.
 """
 
+import os
+
 import pytest
 import yaml
 
@@ -84,7 +86,7 @@ def test_job_defaults_are_the_safe_ones(platform, tmp_path):
 # --- the four web shapes ------------------------------------------------------
 
 def test_every_supported_web_shape_parses(platform, tmp_path):
-    for shape in ("api", "spa", "streamlit"):
+    for shape in ("api", "spa"):
         body = {**BASE_WEB, "web": {"route": "/x", "type": shape}}
         assert config.load_manifest(write(tmp_path, body)).web_type == shape
 
@@ -97,18 +99,21 @@ def test_an_unsupported_web_shape_is_refused(platform, tmp_path):
         config.load_manifest(write(tmp_path, body))
 
 
-def test_streamlit_gets_the_same_data_guarantees(platform, as_app):
-    """The point of the SDK being a library rather than a framework integration:
-    a Streamlit app's entitlement is enforced by exactly the same code."""
-    from insights_sdk.broker import query
-    from insights_sdk.errors import EntitlementError
-    from conftest import signed_in
+def test_a_shape_the_platform_cannot_deliver_is_refused_early(platform, tmp_path):
+    """Streamlit is genuinely wanted and is deliberately NOT accepted.
 
-    as_app("app-streamlit.yaml")
-    with signed_in("vidya@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
-        assert query("hr.headcount", "SELECT dept FROM hr.headcount")      # declared
-        with pytest.raises(EntitlementError):
-            query("hr.compensation", "SELECT * FROM hr.compensation")      # not declared
+    It needs an identity shim and a health sidecar that do not exist. Accepting it in
+    the manifest would move the failure from `insights doctor` on a laptop to a deploy
+    in an environment - the wrong layer (ADR-004). A platform should refuse what it
+    cannot deliver, at the cheapest possible moment.
+    """
+    body = {**BASE_WEB, "web": {"route": "/x", "type": "streamlit"}}
+    with pytest.raises(ManifestError, match="web.type"):
+        config.load_manifest(write(tmp_path, body))
+
+    body = {**BASE_WEB, "runtime": {"sdk": ">=0.1,<1", "base": "python-streamlit"}}
+    with pytest.raises(ManifestError, match="not published"):
+        config.load_manifest(write(tmp_path, body))
 
 
 def test_an_unpublished_base_image_is_refused(platform, tmp_path):
@@ -126,3 +131,33 @@ def test_mechanism_words_are_refused_at_any_depth(platform, tmp_path):
         body = {**BASE_WEB, "data": [{"dataset": "hr.headcount", "access": "read", key: "x"}]}
         with pytest.raises(ManifestError, match=key):
             config.load_manifest(write(tmp_path, body))
+
+
+# --- regressions found by review, locked in -----------------------------------
+
+def test_the_sdk_floor_gate_can_actually_fail(platform, tmp_path, monkeypatch):
+    """The reuse/upgrade story's enforcement point.
+
+    This gate once ended in `or True`, so `>=9.9,<10` -- and even `>=banana` -- passed.
+    A gate that cannot fail is worse than no gate: it is a control everyone believes in.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    gates = Path(__file__).resolve().parents[2] / "insights-platform" / "control" / "cli" / "gates.py"
+    if not gates.is_file():
+        pytest.skip("platform repo not checked out beside the SDK")
+
+    def run(floor: str) -> int:
+        body = {**BASE_WEB, "app": "x", "runtime": {"sdk": floor, "base": "python-web"}}
+        write(tmp_path, body)
+        return subprocess.run(
+            [sys.executable, str(gates), "--app", "x", "--manifest", str(tmp_path / "app.yaml")],
+            cwd=tmp_path, capture_output=True,
+            env={**os.environ, "INSIGHTS_REGISTRY_DIR": str(FIXTURES)},
+        ).returncode
+
+    assert run(">=0.1,<1") == 0        # supported
+    assert run(">=9.9,<10") != 0       # no supported version satisfies it
+    assert run(">=banana") != 0        # not even a version range

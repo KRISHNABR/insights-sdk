@@ -118,14 +118,16 @@ class WebSpec:
     contract. It does NOT change how data is reached - query() is identical in
     all of them, because the SDK is a library rather than a framework integration.
 
-    There is deliberately no server-rendered template shape. Supporting one would
-    mean the platform owning a UI framework - a layout, a component library, CSS -
-    and that is not a thing three engineers should maintain forever when Streamlit
-    already does it better.
+    Two shapes, not more. A server-rendered template shape would mean the platform
+    owning a UI framework - layout, components, CSS - which three engineers should
+    not maintain forever. A Streamlit shape is genuinely wanted and is NOT accepted
+    here, because it needs an identity shim and a health sidecar that do not exist:
+    a manifest that accepts a shape the platform cannot deliver fails at deploy
+    instead of at `insights doctor`, which is the wrong layer (ADR-004, ADR-005).
     """
 
     route: str
-    type: str = "api"                     # api | spa | streamlit
+    type: str = "api"                     # api | spa
     health: str = "/healthz"
 
 
@@ -202,8 +204,8 @@ def _find_manifest() -> Path:
     )
 
 
-VALID_WEB_TYPES = ("api", "spa", "streamlit")
-VALID_BASES = ("python-web", "python-data", "python-min", "python-streamlit")
+VALID_WEB_TYPES = ("api", "spa")
+VALID_BASES = ("python-web", "python-data", "python-min")
 
 
 def load_manifest(path: str | Path | None = None) -> Manifest:

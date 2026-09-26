@@ -419,10 +419,19 @@ def cmd_up(args) -> int:
             config.load_catalog(_registry() / "catalog.yaml").datasets[d.dataset].restricted
             for d in manifest.datasets
         )
+        # Every group that may reach this app at all: the people who manage it, plus
+        # the groups behind each declared role. The EDGE enforces this - see ADR-002
+        # layer 1 - so it has to be reconciled into the registry here rather than the
+        # edge re-reading every tenant's manifest. In production the deploy pipeline
+        # does exactly this step.
+        groups = sorted({
+            *manifest.manage.owners, *manifest.manage.contributors, *manifest.manage.readers,
+            *(g for role in manifest.roles for g in role.groups),
+        })
         registry[manifest.app] = {
             "team": manifest.team, "kind": manifest.kind, "sdk": __version__,
             "path": str(manifest_path.parent), "schedule": manifest.schedule,
-            "restricted": restricted,
+            "restricted": restricted, "groups": groups,
             "port": port if manifest.kind == "web" else None,
         }
         if manifest.kind == "web":
@@ -462,6 +471,25 @@ def cmd_up(args) -> int:
         [sys.executable, "-m", "uvicorn", "runtime.edge.main:app", "--port", str(edge_port),
          "--log-level", "warning"],
         cwd=platform, env=env))
+
+    # Wait for each app to bind before telling anyone the URLs. `up` used to return
+    # as soon as the processes were spawned, so the very first curl in the README
+    # returned 500 - the edge was listening, the app was not. A first-run 500 is an
+    # expensive way to greet someone.
+    import urllib.error
+    import urllib.request
+
+    for name, entry in registry.items():
+        if entry["kind"] != "web":
+            continue
+        for _ in range(60):                      # 15s, 250ms apart
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{entry['port']}/healthz", timeout=1)
+                break
+            except (urllib.error.URLError, OSError):
+                time.sleep(0.25)
+        else:
+            print(f"  ! {name} did not become healthy - try `insights doctor` in {entry['path']}")
 
     print(
         f"\nedge on http://localhost:{edge_port}\n"
