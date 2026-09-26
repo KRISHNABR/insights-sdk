@@ -67,16 +67,24 @@ def _registered() -> dict:
 
 
 def _pythonpath(platform: Path) -> str:
-    """Local dev only.
+    """Make the PLATFORM's runtime importable by a child process. Not the SDK.
 
-    In production the base image pip-installs the SDK, so there is no path juggling.
-    Locally the four repos sit side by side and are not installed, so we put the SDK
-    source and the platform root on the path for child processes. This is the one place
-    the local loop differs from production, and it is deliberately in the CLI rather
-    than in anything a tenant writes.
+    Child processes need `runtime.edge.main` and friends, which live here and are not
+    packaged. They must NOT get the SDK this way.
+
+    It used to prepend `../insights-sdk/src`, which meant `insights run` executed the
+    sibling working copy instead of the version in the app's own lockfile - so a
+    tenant testing locally was running code their lock did not describe, and a run
+    could pass here and fail in CI on the same commit. It also silently required a
+    sibling checkout that a tenant cloning only their own repo does not have.
+
+    The SDK now comes from the app's virtualenv, like every other dependency. To work
+    on the SDK and an app together, overlay it explicitly for one command:
+
+        uv run --with-editable ../insights-sdk insights run
     """
     return os.pathsep.join(
-        [str(platform.parent / "insights-sdk" / "src"), str(platform), os.environ.get("PYTHONPATH", "")]
+        [str(platform), os.environ.get("PYTHONPATH", "")]
     ).rstrip(os.pathsep)
 
 

@@ -478,6 +478,11 @@ path.
 
 ## When the platform ships a new SDK
 
+> **0.2.0 adds the `mysql` engine and deprecates `Caller.has_role()`.** The old call
+> keeps working until 1.0.0 and emits a telemetry record each time, so we can see the
+> migration finish rather than assume it did. Use `require_role("reader")`.
+
+
 Nothing breaks on its own. Your `uv.lock` pins the version you are on, so a release
 reaches you when **you** re-lock:
 

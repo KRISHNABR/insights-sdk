@@ -36,22 +36,31 @@ F = TypeVar("F", bound=Callable[..., Any])
 _seen: set[str] = set()
 
 
-def deprecated(*, since: str, removed_in: str, instead: str) -> Callable[[F], F]:
+def deprecated(*, since: str, removed_in: str, instead: str,
+               symbol: str | None = None) -> Callable[[F], F]:
+    """Wrap a deprecated callable.
+
+    `symbol` overrides the derived name. Needed when the decorator cannot be applied
+    at definition time - `identity` is imported BY `telemetry`, so a module-level
+    decorator there is a circular import, and the lazy workaround derives
+    "Caller.has_role.<locals>.<lambda>". A name nobody can grep for defeats the
+    purpose of the record.
+    """
     def decorate(fn: F) -> F:
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            symbol = f"{fn.__module__}.{fn.__qualname__}"
-            if symbol not in _seen:
-                _seen.add(symbol)
+            name = symbol or f"{fn.__module__}.{fn.__qualname__}"
+            if name not in _seen:
+                _seen.add(name)
                 get_logger().warn(
                     "sdk_deprecated_use",
-                    symbol=symbol,
+                    symbol=name,
                     since=since,
                     removed_in=removed_in,
                     instead=instead,
                 )
                 warnings.warn(
-                    f"{symbol} is deprecated since {since} and will be removed in "
+                    f"{name} is deprecated since {since} and will be removed in "
                     f"{removed_in}. Use {instead}.",
                     DeprecationWarning,
                     stacklevel=2,

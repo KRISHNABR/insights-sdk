@@ -62,7 +62,8 @@ class Caller:
         from .deprecation import deprecated
 
         return deprecated(
-            since="0.2.0", removed_in="1.0.0", instead='require_role("reader")'
+            since="0.2.0", removed_in="1.0.0", instead='require_role("reader")',
+            symbol="insights_sdk.identity.Caller.has_role",
         )(lambda: role in self.groups)()
 
     # `is_service` is a field set by whoever CONSTRUCTS the caller, not something
