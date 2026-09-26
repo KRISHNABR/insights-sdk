@@ -177,6 +177,17 @@ class _Base:
         )
 
 
+    def probe(self) -> None:
+        """Actually reach the remote. Raises ConnectionFailed if it cannot.
+
+        `connect()` only builds the object and resolves the credential - for REST
+        there is no socket until a request is made. A probe that returns without a
+        round trip reports "connected" for a host that does not exist, which is worse
+        than having no probe at all.
+        """
+        raise NotImplementedError
+
+
 class SqlConnector(_Base):
     """Any DB-API/JDBC-shaped engine: Databricks SQL, Redshift, Postgres, SQLite.
 
@@ -205,6 +216,9 @@ class SqlConnector(_Base):
         self._observe(sql, started, len(rows))
         return rows
 
+    def probe(self) -> None:
+        self.query("SELECT 1")
+
     def _execute(self, sql: str, params: dict) -> list[dict]:
         if self.engine == "sqlite":                   # the local stand-in
             import sqlite3
@@ -232,6 +246,27 @@ class SqlConnector(_Base):
 
 class RestConnector(_Base):
     """A REST data source. `query` takes a path, not SQL - same contract, different verb."""
+
+    def probe(self) -> None:
+        import httpx
+
+        try:
+            response = httpx.get(
+                self.config["base_url"],
+                headers=({"Authorization": f"Bearer {self.secret.reveal()}"}
+                         if self.secret is not None else {}),
+                timeout=self.config.get("timeout", 20),
+            )
+        except Exception as exc:                      # noqa: BLE001
+            raise _translate(exc, connection=self.name, engine=self.engine) from exc
+        # Any HTTP response proves the host is reachable and TLS is fine. A 404 on the
+        # base URL is normal - the data lives under a path - so only auth is a failure
+        # here; anything else is the caller's problem to discover at query time.
+        if response.status_code in (401, 403):
+            raise _translate(
+                Exception(f"unauthorized ({response.status_code})"),
+                connection=self.name, engine=self.engine,
+            )
 
     def query(self, path: str, **params: Any) -> list[dict]:
         import httpx

@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import __version__, config, connectors, secrets
+from .. import __version__, config, connectors, identity, secrets
 from ..errors import InsightsError
 from . import scaffold
 
@@ -360,9 +360,16 @@ def cmd_connections(args) -> int:
             print(f"    secret    none")
 
         if args.probe:
+            # Probe as the app's own service identity - which is exactly what an
+            # unattended run does. Without a caller, `connect()` refuses (correctly:
+            # the credential is the app's, not nobody's) and the probe could never
+            # probe anything.
             try:
-                connectors.connect(spec.name, manifest=manifest)
-                print(f"    probe     connected")
+                with identity.as_caller(identity.Caller.service(
+                    manifest.service_identity, manifest.manage.everyone, "probe"
+                )):
+                    connectors.connect(spec.name, manifest=manifest).probe()
+                print(f"    probe     reached it")
             except InsightsError as exc:
                 print(f"    probe     FAILED ({getattr(exc, 'kind', 'unknown')})")
                 print(f"              {str(exc).splitlines()[0]}")
@@ -623,6 +630,14 @@ def cmd_up(args) -> int:
     }
     port += 1
 
+    # Record the environment `up` actually chose, so `insights run` and `insights
+    # connections` agree with the stack that is running. environments.yaml can only
+    # hold a default port, and `up --port 9000` moves every stub - which silently
+    # pointed `run` at a directory API that was not there.
+    (_registry() / "env.local.json").write_text(json.dumps({
+        "INSIGHTS_DIRECTORY_URL": f"http://127.0.0.1:{directory_port}",
+    }, indent=2) + "\n")
+
     _apps_file(local=True).write_text(json.dumps(registry, indent=2) + "\n")
     print(f"registered {len(registry)} app(s) -> {_apps_file(local=True).name}")
 
@@ -860,6 +875,19 @@ def _local_defaults() -> None:
     and an earlier version of this function raised there, so the very first command a
     new team runs failed with "Run this from inside the insights-hub workspace".
     """
+    # ORDER MATTERS: every write below is a setdefault, so the FIRST writer wins.
+    # The live file goes first because it describes the stack that is actually
+    # running - environments.yaml can only carry a default port, and `up --port 9000`
+    # moves every stub. Reading it second made it a no-op and pointed `insights run`
+    # at a directory API that was not there.
+    try:
+        live = _registry() / "env.local.json"
+    except InsightsError:
+        live = None
+    if live is not None and live.is_file():
+        for key, value in json.loads(live.read_text()).items():
+            os.environ.setdefault(str(key), str(value))
+
     # Values for the ${VAR} placeholders in tenant connections, from the platform's
     # own per-environment registry. In production the deploy pipeline renders these
     # into the task definition or pod spec; here we export them. Same mechanism,

@@ -146,3 +146,33 @@ def test_driver_errors_become_actionable(driver_message, expected_kind):
     assert error.kind == expected_kind
     assert "team-warehouse" in str(error), "must name the connection"
     assert driver_message in str(error), "keep the driver's own words too"
+
+
+def test_probe_does_a_real_round_trip(app):
+    """`connect()` only builds the object and resolves the credential - for REST there
+    is no socket until a request is made. A probe that skips the round trip reports
+    "connected" for a host that does not exist, which is worse than no probe."""
+    import inspect
+
+    from insights_sdk.connectors import RestConnector, SqlConnector, _Base
+
+    # the base refuses to answer: every engine must implement it
+    with pytest.raises(NotImplementedError):
+        _Base.probe(object())
+
+    assert "SELECT 1" in inspect.getsource(SqlConnector.probe)
+    assert "httpx" in inspect.getsource(RestConnector.probe)
+
+
+def test_a_probe_against_a_dead_host_fails(platform, as_app, monkeypatch):
+    """The point of the round trip: an unreachable host must fail the probe, not pass
+    it. `app-job.yaml` resolves its path from ${INSIGHTS_WAREHOUSE_PATH}, so pointing
+    that somewhere dead is the whole test."""
+    from insights_sdk import ConnectionFailed, connect
+
+    as_app("app-job.yaml")
+    monkeypatch.setenv("INSIGHTS_WAREHOUSE_PATH", "/nope/missing.db")
+    with signed_in("sp-demo"):
+        with pytest.raises(ConnectionFailed) as exc:
+            connect("team-warehouse").probe()
+    assert exc.value.kind == "network"
