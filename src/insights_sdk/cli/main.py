@@ -42,6 +42,17 @@ def _platform() -> Path:
 
 
 def _registry() -> Path:
+    """Where the platform's own registry lives.
+
+    INSIGHTS_REGISTRY_DIR wins. In a deployed app it is mounted; in CI it is passed;
+    and it is how an app OUTSIDE the four-repo workspace - a tenant who cloned only
+    their own repo - still resolves environments.yaml. Without this the variable was
+    quietly ignored whenever no workspace was found, which is exactly when someone
+    would be setting it.
+    """
+    explicit = os.environ.get("INSIGHTS_REGISTRY_DIR")
+    if explicit:
+        return Path(explicit)
     return _platform() / "control" / "registry"
 
 
@@ -324,7 +335,18 @@ def cmd_connections(args) -> int:
         print(f"  {spec.name}")
         print(f"    engine    {spec.engine}")
         for key, value in sorted(spec.options.items()):
-            print(f"    {key:<9} {value}")
+            # Show what a ${VAR} resolves to. The value is substituted at connect()
+            # time, so without this the one question this command exists to answer -
+            # "what will it actually talk to?" - is the one thing it does not show.
+            shown = str(value)
+            if "${" in shown:
+                try:
+                    resolved = connectors._expand(value, spec.name)
+                    shown = f"{value}   ->  {resolved}"
+                except InsightsError:
+                    shown = f"{value}   ->  [NOT SET]"
+                    problems += 1
+            print(f"    {key:<9} {shown}")
         if spec.secret:
             path = secrets.path_for(manifest.app, spec.secret)
             try:
@@ -838,10 +860,29 @@ def _local_defaults() -> None:
     and an earlier version of this function raised there, so the very first command a
     new team runs failed with "Run this from inside the insights-hub workspace".
     """
+    # Values for the ${VAR} placeholders in tenant connections, from the platform's
+    # own per-environment registry. In production the deploy pipeline renders these
+    # into the task definition or pod spec; here we export them. Same mechanism,
+    # different writer - which is why a manifest needs no environment handling.
+    try:
+        registry = _registry() / "environments.yaml"
+    except InsightsError:
+        registry = None
+    if registry is not None and registry.is_file():
+        import yaml
+
+        env_name = os.environ.get("INSIGHTS_ENV", "local")
+        block = (yaml.safe_load(registry.read_text()) or {}).get(env_name) or {}
+        for key, value in block.items():
+            os.environ.setdefault(str(key), str(value))
+
+    # The rest of these are paths inside the platform checkout, so they only apply
+    # when there is one. `insights new-app` runs from an empty directory by design.
     try:
         platform = _platform()
     except InsightsError:
         return
+
     for key, value in (
         ("INSIGHTS_ENV", "local"),
         ("INSIGHTS_REGISTRY_DIR", str(_registry())),
