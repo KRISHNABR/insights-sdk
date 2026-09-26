@@ -395,8 +395,29 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
-# Rendered by `insights build`. Derived from app.yaml, never source.
-.insights/
+
+# YOUR LOCAL SECRETS. Never commit this - a credential in git is a credential in the
+# history forever, and CI refuses a tracked .env. Commit .env.example instead.
+.env
+"""
+
+
+ENV_EXAMPLE = """\
+# Local secret values for {name}. COPY THIS TO .env AND FILL IT IN.
+#
+#     cp .env.example .env
+#
+# .env is gitignored and CI refuses a committed one. Fake values are fine here -
+# this file only exists so `insights serve` and `insights run` work on a laptop.
+#
+# In dev and prod none of this is used. The platform injects each value from
+#     insights/{name}/<secret-name>
+# using your app's own identity - written by your team, and unreadable by the
+# platform team (an explicit IAM Deny, not a promise).
+#
+# One line per `secret:` in your app.yaml. For example:
+#
+#     my-warehouse-token=local-fake-value
 """
 
 # --------------------------------------------------------------------------------
@@ -561,13 +582,18 @@ pins its base, so a rollback gets the image you actually had.
 1. Declare it in `app.yaml` under `connections:` — engine, host, and the **name** of a
    secret. Never the value: this file is in git, and a credential here is a credential
    in the history forever. The loader refuses one.
-2. Put the value in the secret store at `insights/{name}/<secret-name>`. Your team
-   writes it. **The platform team cannot read it** — an explicit IAM Deny, not a
-   promise.
-3. `uv run insights connections --probe` to check it works.
+2. **Locally**, put the value in `.env` in this repo:
 
-Locally, write the value to the fake store; `insights connections` prints the exact
-path.
+   ```
+   my-warehouse-token=any-local-value
+   ```
+
+   `.env` is gitignored and CI refuses a committed one. Commit `.env.example`.
+3. **In dev and prod**, your team writes it to `insights/{name}/<secret-name>` in the
+   secret store. The platform binds your app's identity to that path and **cannot
+   read the value** — an explicit IAM Deny, not a promise. `.env` is not read outside
+   local, so a stray one cannot become a production credential.
+4. `uv run insights connections --probe` to check it works.
 
 ---
 
@@ -625,6 +651,7 @@ or VPC routing failure is ours. If it says ours, tell us and paste the error.
 
 - **Do not edit `.github/workflows/`** — platform-owned, and overwritten on upgrade.
 - **Do not put a credential in `app.yaml`** — CI refuses it, and git remembers anyway.
+- **Do not commit `.env`** — CI refuses that too. `.env.example` is the committed one.
 - **Do not run as root in your Dockerfile** — CI refuses it.
 - **Do not add a second logger.** `get_logger()` refuses to emit a payload; a
   `logging.getLogger` beside it is an unenforced second path out of the process.
@@ -692,6 +719,7 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
         }),
         Path("README.md"): README.format(name=name, kind=kind, team=team),
         Path(".gitignore"): GITIGNORE,
+        Path(".env.example"): ENV_EXAMPLE.format(name=name),
         # Generated once, then yours. Not in PLATFORM_OWNED, so `upgrade-scaffold`
         # will not overwrite your edits.
         Path("Dockerfile"): render_dockerfile(view),

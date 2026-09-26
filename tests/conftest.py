@@ -46,12 +46,10 @@ def platform(tmp_path, monkeypatch):
     db = tmp_path / "warehouse.db"
     _seed(db)
 
-    store = tmp_path / "secret-store" / "demo"
-    store.mkdir(parents=True)
-    (store / "warehouse-token").write_text("not-a-real-token")
+    # Local secrets live in the app's own .env, beside its manifest - see secrets.py.
+    (FIXTURES / ".env").write_text("warehouse-token=not-a-real-token\n")
 
     monkeypatch.setenv("INSIGHTS_WAREHOUSE_PATH", str(db))
-    monkeypatch.setenv("INSIGHTS_SECRET_DIR", str(tmp_path / "secret-store"))
     monkeypatch.setenv("INSIGHTS_EDGE_TOKEN", EDGE_TOKEN)
     monkeypatch.setenv("INSIGHTS_ENV", "local")
     config.reset()

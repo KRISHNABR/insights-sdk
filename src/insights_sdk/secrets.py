@@ -84,37 +84,74 @@ def path_for(app: str, name: str) -> str:
     return f"insights/{app}/{name}"
 
 
+def _from_dotenv(name: str, app_dir: Path) -> str | None:
+    """Read one key from the app's own `.env`. LOCAL ONLY.
+
+    A team's credential belongs in the team's repo, next to the code that uses it -
+    not in a directory inside the platform's checkout, which made a tenant depend on
+    the platform's layout to run at all.
+
+    `.env` is gitignored by the generator and the deploy gate refuses a committed one,
+    because a credential in git is a credential in the history forever.
+    """
+    target = app_dir / ".env"
+    if not target.is_file():
+        return None
+    for line in target.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == name:
+            return value.strip().strip('"').strip("'")
+    return None
+
+
 def resolve(app: str, name: str) -> Secret:
-    """Fetch a secret for THIS app. Two backends, one contract.
+    """Fetch a secret for THIS app.
 
     An app can only ever ask for its own: the caller passes no path, and `app` comes
-    from the manifest the platform registered, not from anything a tenant types at
-    call time.
+    from the manifest the platform registered, not from anything a tenant types.
+
+    Three sources, in order, and the order is the design:
+
+      1. an injected environment variable   how production delivers it
+      2. the app's own .env                 LOCAL ONLY, and only for local
+      3. nothing - a clear error naming the file and whose job it is
+
+    In production only (1) exists. The runtime injects the value from Secrets Manager
+    using the app's own identity, and `.env` is not consulted at all - which is
+    enforced below rather than documented, because "remember not to ship a .env" is
+    not a control.
     """
-    # 1. An explicit environment override. This is how a job running in ECS or
-    #    Kubernetes receives an injected secret, and how a developer points at
-    #    their own sandbox credential without editing any file.
+    # 1. An injected variable. In ECS or Kubernetes the platform populates this from
+    #    the secret store using the app's identity; locally a developer can export it
+    #    to point at a sandbox credential without editing any file.
     env_key = f"INSIGHTS_SECRET_{name.upper().replace('-', '_')}"
     if env_key in os.environ:
         return Secret(name, os.environ[env_key])
 
-    # 2. The local file store. In production this branch is a call to AWS Secrets
-    #    Manager (or Vault) with the app's own identity - same path, same scoping,
-    #    and the failure modes below map one-to-one onto its error codes.
-    store = os.environ.get("INSIGHTS_SECRET_DIR")
-    if not store:
+    # 2. The app's own .env. Refused outside local, so a .env that escapes into an
+    #    image cannot quietly become the source of a production credential.
+    environment = os.environ.get("INSIGHTS_ENV", "local")
+    app_dir = Path(os.environ.get("INSIGHTS_APP_MANIFEST", "app.yaml")).resolve().parent
+    if environment == "local":
+        value = _from_dotenv(name, app_dir)
+        if value:
+            return Secret(name, value)
         raise SecretError(
-            f"no secret backend configured, so '{name}' cannot be resolved. "
-            f"Locally, `insights up` and `insights run` set this for you."
+            f"secret '{name}' is not set.\n"
+            f"  add it to   {app_dir / '.env'}\n"
+            f"      {name}=some-local-value\n"
+            f"  .env is gitignored, and CI refuses a committed one.\n"
+            f"  in dev and prod this comes from {path_for(app, name)}, which your\n"
+            f"  team writes and the platform team cannot read."
         )
 
-    target = Path(store) / app / name
-    if not target.is_file():
-        raise SecretError(
-            f"secret '{name}' is not set for this app.\n"
-            f"  expected at  {path_for(app, name)}\n"
-            f"  who sets it  your team - the platform creates the slot and cannot "
-            f"read or write the value\n"
-            f"  locally      write it to {target}"
-        )
-    return Secret(name, target.read_text().strip())
+    raise SecretError(
+        f"secret '{name}' was not injected into this {environment} environment.\n"
+        f"  expected as  {env_key}\n"
+        f"  from         {path_for(app, name)}\n"
+        f"  who sets it  your team. The platform binds your app's identity to that\n"
+        f"               path and cannot read or write the value itself."
+    )

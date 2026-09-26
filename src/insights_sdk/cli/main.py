@@ -270,8 +270,10 @@ def cmd_doctor(args) -> int:
                 detail += f", secret '{connection.secret}' present"
             except InsightsError:
                 print(_bad(f"connection {connection.name}: secret '{connection.secret}' is not set"))
-                print(f"        expected at {secrets.path_for(manifest.app, connection.secret)}")
-                print("        your team sets it. The platform cannot read or write the value.")
+                print(f"        add to .env in this repo:  {connection.secret}=some-value")
+                print(f"        in dev and prod it comes from "
+                      f"{secrets.path_for(manifest.app, connection.secret)},")
+                print("        which your team writes and the platform team cannot read.")
                 problems += 1
                 continue
         print(_ok(f"connection {connection.name} ({detail})"))
@@ -353,8 +355,9 @@ def cmd_connections(args) -> int:
                 secrets.resolve(manifest.app, spec.secret)
                 print(f"    secret    {spec.secret}  ->  {path}  [present]")
             except InsightsError:
-                print(f"    secret    {spec.secret}  ->  {path}  [MISSING]")
-                print(f"              your team sets this. The platform cannot read it.")
+                print(f"    secret    {spec.secret}  ->  {path}  [NOT SET LOCALLY]")
+                print(f"              add it to .env in this repo:  {spec.secret}=some-value")
+                print(f"              .env is gitignored; CI refuses a committed one.")
                 problems += 1
         else:
             print(f"    secret    none")
@@ -622,10 +625,11 @@ def cmd_serve(args) -> int:
     for spec in manifest.connections:
         if not spec.secret:
             continue
-        target = Path(os.environ["INSIGHTS_SECRET_DIR"]) / manifest.app / spec.secret
-        if not target.is_file():
-            print(f"  ! '{spec.secret}' is not set locally, so '{spec.name}' will fail.")
-            print(f"    mkdir -p {target.parent} && echo local-fake > {target}\n")
+        try:
+            secrets.resolve(manifest.app, spec.secret)
+        except InsightsError:
+            print(f"  ! '{spec.secret}' is not set, so '{spec.name}' will fail.")
+            print(f"    add it to .env in this repo:  {spec.secret}=local-fake-value\n")
 
     entry = {
         "team": manifest.team, "kind": "web", "sdk": __version__,
@@ -758,9 +762,6 @@ def cmd_up(args) -> int:
         INSIGHTS_EDGE_TOKEN=env.get("INSIGHTS_EDGE_TOKEN", "local-edge-token"),
         INSIGHTS_DIRECTORY_URL=f"http://127.0.0.1:{directory_port}",
         INSIGHTS_SINK_DIR=str(_sink_dir()),
-        # The local stand-in for AWS Secrets Manager. Same path shape, same
-        # per-app scoping; only the thing enforcing it differs.
-        INSIGHTS_SECRET_DIR=str(platform / "runtime" / "fakes" / "secret-store"),
         INSIGHTS_WAREHOUSE_PATH=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         # In production these come from the base image. Locally the four repos are
         # not installed, so the CLI points at the same files the image would carry.
@@ -894,9 +895,6 @@ def cmd_run(args) -> int:
         INSIGHTS_EDGE_TOKEN=env.get("INSIGHTS_EDGE_TOKEN", "local-edge-token"),
         INSIGHTS_DIRECTORY_URL="http://127.0.0.1:8081",
         INSIGHTS_SINK_DIR=str(_sink_dir()),
-        # The local stand-in for AWS Secrets Manager. Same path shape, same
-        # per-app scoping; only the thing enforcing it differs.
-        INSIGHTS_SECRET_DIR=str(platform / "runtime" / "fakes" / "secret-store"),
         INSIGHTS_WAREHOUSE_PATH=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         INSIGHTS_APP_MANIFEST=str(manifest.path),
         INSIGHTS_APP=manifest.app,
@@ -1044,7 +1042,6 @@ def _local_defaults() -> None:
         # header the edge injects and every caller arrives anonymous.
         ("INSIGHTS_EDGE_TOKEN", "local-edge-token"),
         ("INSIGHTS_REGISTRY_DIR", str(_registry())),
-        ("INSIGHTS_SECRET_DIR", str(platform / "runtime" / "fakes" / "secret-store")),
         ("INSIGHTS_DIRECTORY_URL", "http://127.0.0.1:8081"),
         ("INSIGHTS_WAREHOUSE_PATH",
          str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db")),

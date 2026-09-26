@@ -42,10 +42,7 @@ connections:
 job:
   schedule: "0 6 * * MON"
 """)
-    store = tmp_path / "secrets"
-    (store / "demo").mkdir(parents=True)
-    (store / "demo" / "warehouse-token").write_text("s3cr3t-value\n")
-    monkeypatch.setenv("INSIGHTS_SECRET_DIR", str(store))
+    (tmp_path / ".env").write_text("warehouse-token=s3cr3t-value\n")
     monkeypatch.setenv("INSIGHTS_APP_MANIFEST", str(tmp_path / "app.yaml"))
     config.reset()
     yield tmp_path
@@ -110,14 +107,35 @@ def test_a_secret_never_stringifies_to_its_value(app):
         assert "REDACTED" in rendered
 
 
-def test_a_missing_secret_says_who_sets_it(app, monkeypatch):
-    monkeypatch.delenv("INSIGHTS_SECRET_WAREHOUSE_TOKEN", raising=False)
-    (app / "secrets" / "demo" / "warehouse-token").unlink()
+def test_a_missing_secret_says_where_to_put_it(app):
+    """The error has one job: tell you the file and whose value it is."""
+    (app / ".env").unlink()
     with pytest.raises(secrets.SecretError) as exc:
         secrets.resolve("demo", "warehouse-token")
     message = str(exc.value)
-    assert "your team" in message.lower()
+    assert ".env" in message
+    assert "gitignored" in message
     assert "cannot read" in message, "must say the platform team cannot read it"
+
+
+def test_dotenv_is_refused_outside_local(app, monkeypatch):
+    """A .env that escapes into an image must not quietly become the source of a
+    production credential. Enforced, not documented - "remember not to ship a .env"
+    is not a control."""
+    monkeypatch.setenv("INSIGHTS_ENV", "prod")
+    with pytest.raises(secrets.SecretError) as exc:
+        secrets.resolve("demo", "warehouse-token")
+    message = str(exc.value)
+    assert ".env" not in message
+    assert "INSIGHTS_SECRET_WAREHOUSE_TOKEN" in message, "must name the injected variable"
+    assert "insights/demo/warehouse-token" in message
+
+
+def test_an_injected_variable_wins_over_dotenv(app, monkeypatch):
+    """How production delivers a secret, and how a developer points at a sandbox
+    credential without editing a file."""
+    monkeypatch.setenv("INSIGHTS_SECRET_WAREHOUSE_TOKEN", "from-the-environment")
+    assert secrets.resolve("demo", "warehouse-token").reveal() == "from-the-environment"
 
 
 def test_secrets_are_scoped_per_app(app):
@@ -125,8 +143,6 @@ def test_secrets_are_scoped_per_app(app):
     and the isolation story would be a comment rather than a boundary."""
     assert secrets.path_for("comp-report", "tok") == "insights/comp-report/tok"
     assert secrets.path_for("other-app", "tok") != secrets.path_for("comp-report", "tok")
-    with pytest.raises(secrets.SecretError):
-        secrets.resolve("other-app", "warehouse-token")
 
 
 @pytest.mark.parametrize("driver_message, expected_kind", [
