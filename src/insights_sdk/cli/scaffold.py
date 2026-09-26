@@ -114,6 +114,12 @@ dev = ["pytest>=8.0"]
 [tool.uv]
 package = false
 
+[tool.uv.sources]
+# LOCAL DEVELOPMENT ONLY - build against the SDK checkout beside this repo rather than
+# the last published release. Removed in a registry-backed environment, where the
+# version range above is the contract. See ADR-001.
+insights-sdk = {{ path = "../insights-sdk", editable = true }}
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 """
