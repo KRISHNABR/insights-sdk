@@ -14,7 +14,7 @@ from insights_sdk import web_app, job, query, fetch, get_logger, current_user, r
 
 ## Why the CLI lives in here
 
-`insights new-app` generates a repository whose Dockerfile and CI config must be
+`insights new-app` generates a repository whose CI callers and project file must be
 compatible with the library version they target. Shipped separately, you get
 scaffold/library skew and no way to detect it. Shipped together, that is structurally
 impossible — and `insights upgrade-scaffold` can re-render those files later precisely
@@ -28,7 +28,7 @@ src/insights_sdk/
 ├── config.py         app.yaml + the platform registry. Where "declare, don't wire" is enforced
 ├── identity.py       Caller, and the trusted-edge model. groups is () unless trusted
 ├── obs.py            the logger, the redaction boundary, the audit stream
-├── engines.py        one adapter per shared connection. The only code holding a credential
+├── engines.py        one adapter per connection, resolved per environment
 ├── data.py           the broker — the single path to data. Start reading here
 ├── app.py            web_app() and run_job()
 ├── deprecation.py    deprecation telemetry (ADR-001's keystone)
