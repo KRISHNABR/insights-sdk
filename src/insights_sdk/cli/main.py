@@ -577,6 +577,132 @@ def _port_free(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) != 0
 
 
+#: The demo users the local edge knows. Only used to suggest a working `?as=` - the
+#: edge holds the real list, and this is a convenience, not an authorization source.
+_LOCAL_USERS = {
+    "krishna@corp.example": ("MG-PEOPLE-OPS", "headcount-viewer"),
+    "vidya@corp.example": ("MG-PEOPLE-ANALYTICS", "comp-analyst"),
+    "lokesh@corp.example": ("MG-PEOPLE-ANALYTICS",),
+    "suraj@corp.example": ("MG-PLATFORM",),
+}
+
+
+def cmd_serve(args) -> int:
+    """Run THIS web app against a platform that is already running.
+
+    The independent half of `insights up`. You start the platform once, in its own
+    repo, in its own terminal; then each app runs in its own repo, in its own
+    terminal, and can be started and stopped without touching anything else.
+
+    Registration is live: the edge re-reads the registry on every request, so the app
+    is reachable the moment it binds and gone the moment you stop it. Nothing restarts.
+    """
+    manifest = config.manifest()
+    if manifest.kind != "web":
+        print(f"{manifest.app} is a {manifest.kind}, not a web app.\n\n"
+              f"    uv run insights run       # run it once, as the scheduler would")
+        return 1
+
+    platform = _platform()
+    edge_port = args.edge
+    if not _edge_is_up(edge_port):
+        print(f"No platform on :{edge_port}.\n\n"
+              f"Start it first, in the platform repo:\n\n"
+              f"    cd ../insights-platform && uv run insights up\n\n"
+              f"(or point at another one: `insights serve --edge 9002`)")
+        return 1
+
+    port = args.port or _free_port(edge_port + 21)
+    if not _port_free(port):
+        print(f"port {port} is already in use. Try `insights serve --port {port + 10}`.")
+        return 1
+
+    # Warn about a secret this app declares that has no local value. Report, never
+    # create: the platform does not write a tenant's secret, locally or anywhere.
+    for spec in manifest.connections:
+        if not spec.secret:
+            continue
+        target = Path(os.environ["INSIGHTS_SECRET_DIR"]) / manifest.app / spec.secret
+        if not target.is_file():
+            print(f"  ! '{spec.secret}' is not set locally, so '{spec.name}' will fail.")
+            print(f"    mkdir -p {target.parent} && echo local-fake > {target}\n")
+
+    entry = {
+        "team": manifest.team, "kind": "web", "sdk": __version__,
+        "path": str(manifest.path.parent), "schedule": None,
+        "groups": sorted(manifest.manage.everyone),
+        "connections": [c.name for c in manifest.connections],
+        "port": port,
+    }
+    _register(manifest.app, entry)
+
+    env = dict(
+        os.environ,
+        INSIGHTS_APP=manifest.app,
+        INSIGHTS_APP_MANIFEST=str(manifest.path),
+        PYTHONPATH=_pythonpath(platform),
+    )
+    url = f"http://localhost:{edge_port}/apps/{manifest.app}/"
+    print(f"{manifest.app} on :{port}\n")
+    # Print a user who can actually sign in, not the owning GROUP - `?as=` takes a
+    # person. Prefer one of the local demo users who is in a group this app allows.
+    allowed = set(manifest.manage.everyone)
+    who = next((u for u, groups in _LOCAL_USERS.items() if allowed & set(groups)),
+               "krishna@corp.example")
+    print(f"  open    {url}?as={who}")
+    print(f"          (anyone in {', '.join(sorted(allowed)) or 'any group'})")
+    print(f"  logs    appear below. ctrl-c to stop and deregister.\n")
+
+    process = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "main:app", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=manifest.path.parent / "src", env=env,
+    )
+    try:
+        return process.wait()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        # Deregister, always. A stale entry points the edge at a dead port, and the
+        # 502 it produces reads as "the app is broken" rather than "not running".
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        _register(manifest.app, None)
+
+
+def _edge_is_up(port: int) -> bool:
+    import urllib.error
+    import urllib.request
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        opener.open(f"http://127.0.0.1:{port}/", timeout=2)
+        return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _free_port(start: int) -> int:
+    for candidate in range(start, start + 50):
+        if _port_free(candidate):
+            return candidate
+    return start
+
+
+def _register(app: str, entry: dict | None) -> None:
+    """Add or remove one app in the local registry, leaving the others alone."""
+    path = _apps_file(local=True)
+    current = json.loads(path.read_text()) if path.is_file() else {}
+    if entry is None:
+        current.pop(app, None)
+    else:
+        current[app] = entry
+    path.write_text(json.dumps(current, indent=2) + "\n")
+
+
 def cmd_up(args) -> int:
     """Start the whole local platform: warehouse, directory stub, every web app, the edge."""
     workspace, platform = _workspace(), _platform()
@@ -596,111 +722,40 @@ def cmd_up(args) -> int:
     # 1. seed the stub warehouse (idempotent)
     _seed_local_warehouse(platform)
 
-    # 2. register every app in the workspace. In production this happens in CI, once per
-    #    deploy; locally we discover the sibling repos so `up` is a single command.
-    registry, port = {}, args.port + 21
-    for manifest_path in sorted(workspace.glob("insights-*/app.yaml")):
-        config.reset()
-        manifest = config.load_manifest(manifest_path)
-        # Every group that may reach this app at all. Since `access.roles` was
-        # removed, that is exactly the union of the three management tiers - which
-        # `manage.everyone` already computes, so the edge's table and `require_role`
-        # cannot disagree about who is listed.
-        groups = sorted(manifest.manage.everyone)
-        registry[manifest.app] = {
-            "team": manifest.team, "kind": manifest.kind, "sdk": __version__,
-            "path": str(manifest_path.parent), "schedule": manifest.schedule,
-            "connections": [c.name for c in manifest.connections], "groups": groups,
-            "port": port if manifest.kind == "web" else None,
+    # `up` starts the PLATFORM. It does not start tenant apps.
+    #
+    # It used to glob `insights-*/app.yaml` across a four-repo workspace and start
+    # everything at once. That made three things true and all of them bad: you needed
+    # every repo cloned with exact names before anything ran, one broken app made the
+    # whole stack look broken, and adding an app meant restarting the lot.
+    #
+    # Now each side is independent. The platform runs on its own; a tenant runs
+    # `insights serve` in their own repo and registers with it live - the edge
+    # re-reads the registry on every request, so nothing needs restarting.
+    # The console is the one app `up` starts, because it is the platform's own.
+    console_port = args.port + 2
+    registry = {
+        "console": {
+            "team": "platform", "kind": "web", "sdk": __version__,
+            "path": str(platform / "runtime" / "console"), "schedule": None,
+            "groups": [], "connections": [], "port": console_port,
         }
-        if manifest.kind == "web":
-            port += 1
-    # The console registers like any other app, on purpose.
-    #
-    # It is the platform team's own tool, and it goes through the edge, gets the same
-    # session cookie and the same group check as a tenant. If the edge breaks, the
-    # thing you would use to diagnose it breaks the same way - which is a far better
-    # bug to have than a console that works when nothing else does.
-    #
-    # `groups` is empty, which the edge reads as "any signed-in user". Deliberate: a
-    # tenant should be able to see their own app's health without asking us. There is
-    # nothing here to gate, because there is no tenant data in it.
-    registry["console"] = {
-        "team": "platform", "kind": "web", "sdk": __version__,
-        "path": str(platform / "runtime" / "console"), "schedule": None,
-        "restricted": False, "groups": [],
-        "port": port,
     }
-    port += 1
-
-    # Record the environment `up` actually chose, so `insights run` and `insights
-    # connections` agree with the stack that is running. environments.yaml can only
-    # hold a default port, and `up --port 9000` moves every stub - which silently
-    # pointed `run` at a directory API that was not there.
-    # Check the APP ports too, before spawning anything.
-    #
-    # Only the edge and the stub were checked, so a busy app port produced a
-    # half-started stack and "X did not become healthy" - which reads like the app is
-    # broken. The cause was one line down in its startup log, but the message pointed
-    # at `insights doctor`, which would have said the app is fine. Refuse up front and
-    # name the port instead.
-    taken = [(name, entry["port"]) for name, entry in registry.items()
-             if entry.get("port") and not _port_free(entry["port"])]
-    if taken:
-        for name, port in taken:
-            print(f"port {port} ({name}) is already in use.")
-        print(f"\nAnother `insights up` is probably still running. Stop it, or start "
-              f"this one elsewhere:\n\n    insights up --port {args.port + 100}")
-        return 1
 
     (_registry() / "env.local.json").write_text(json.dumps({
         "INSIGHTS_DIRECTORY_URL": f"http://127.0.0.1:{directory_port}",
     }, indent=2) + "\n")
 
+    # Start from a clean registry. A stale entry from a previous session points the
+    # edge at a port nothing is listening on, and the 502 that produces looks like the
+    # app is broken rather than absent.
     _apps_file(local=True).write_text(json.dumps(registry, indent=2) + "\n")
-    print(f"registered {len(registry)} app(s) -> {_apps_file(local=True).name}")
-
-    # Tell people about local secrets they have not set yet.
-    #
-    # The fake store is gitignored - we do not commit credentials, even obviously fake
-    # ones - so a FRESH CLONE has none, and every app declaring a `secret:` fails its
-    # first connection with no hint that the clone is the reason. Found by following
-    # the walkthrough on a clean checkout.
-    #
-    # We report, we do not create: the platform never writes a tenant's secret, and
-    # a local convenience that did would teach exactly the wrong model.
-    secret_dir = platform / "runtime" / "fakes" / "secret-store"
-    missing = []
-    for name, entry in registry.items():
-        manifest_path = Path(entry["path"]) / "app.yaml"
-        if not manifest_path.is_file():
-            continue
-        try:
-            config.reset()
-            app_manifest = config.load_manifest(manifest_path)
-        except InsightsError:
-            continue
-        for spec in app_manifest.connections:
-            if not spec.secret:
-                continue
-            target = secret_dir / name / spec.secret
-            if not target.is_file():
-                missing.append((name, spec.secret, target))
-    config.reset()
-    if missing:
-        print(f"\n  {len(missing)} local secret(s) not set — these apps will fail to connect:")
-        for name, secret, target in missing:
-            print(f"    {name}: {secret}")
-        print("  set them with (a fake value is fine locally):")
-        for _, _, target in missing:
-            print(f"    mkdir -p {target.parent} && echo local-fake > {target}")
 
     env = dict(os.environ)
     env.update(
         INSIGHTS_ENV="local",
         INSIGHTS_REGISTRY_DIR=str(_registry()),
         INSIGHTS_EDGE_TOKEN=env.get("INSIGHTS_EDGE_TOKEN", "local-edge-token"),
-        INSIGHTS_WAREHOUSE_DSN=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         INSIGHTS_DIRECTORY_URL=f"http://127.0.0.1:{directory_port}",
         INSIGHTS_SINK_DIR=str(_sink_dir()),
         # The local stand-in for AWS Secrets Manager. Same path shape, same
@@ -709,7 +764,6 @@ def cmd_up(args) -> int:
         INSIGHTS_WAREHOUSE_PATH=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         # In production these come from the base image. Locally the four repos are
         # not installed, so the CLI points at the same files the image would carry.
-        INSIGHTS_TEMPLATES=str(platform / "runtime" / "base-image" / "design-system"),
         INSIGHTS_OUTPUT_DIR=str(platform / "runtime" / "outputs"),
         PYTHONPATH=_pythonpath(platform),
     )
@@ -786,17 +840,14 @@ def cmd_up(args) -> int:
             print(f"  ! {name} did not become healthy - try `insights doctor` in {entry['path']}")
 
     print(
-        f"\nedge on http://localhost:{edge_port}\n"
-        f"  the console     http://localhost:{edge_port}/a/console/?as=suraj@corp.example\n"
-        f"  the dashboard   http://localhost:{edge_port}/a/headcount-dashboard/?as=krishna@corp.example\n"
-        f"  who am I        http://localhost:{edge_port}/a/headcount-dashboard/api/me\n"
-        f"  the data        http://localhost:{edge_port}/a/headcount-dashboard/api/headcount?month=2026-09\n"
-        f"\n  the ?as= is only on the FIRST url - it stands in for the IdP redirect and sets\n"
-        f"  a session cookie. Without it every route returns 401, which is the point.\n"
-        f"\nlogs     insights logs --app headcount-dashboard --startup   (why it did or did not boot)\n"
-        f"         insights logs --app headcount-dashboard             (what it did once running)\n"
-        f"         insights logs --event query_executed                 (every query, by connection)\n"
-        f"\nctrl-c to stop"
+        f"\nTHE PLATFORM IS UP\n"
+        f"\n  edge      http://localhost:{edge_port}\n"
+        f"  console   http://localhost:{edge_port}/apps/console/?as=suraj@corp.example\n"
+        f"\nNo tenant apps are running yet - that is deliberate, they are independent.\n"
+        f"To run one, open another terminal, go to its repo and:\n"
+        f"\n    uv run insights serve        (a web app)\n"
+        f"    uv run insights run          (a scheduled job)\n"
+        f"\nctrl-c to stop the platform\n"
     )
     # Tear the stack down on ANY exit, not just ctrl-c.
     #
@@ -841,7 +892,6 @@ def cmd_run(args) -> int:
         INSIGHTS_ENV="local",
         INSIGHTS_REGISTRY_DIR=str(_registry()),
         INSIGHTS_EDGE_TOKEN=env.get("INSIGHTS_EDGE_TOKEN", "local-edge-token"),
-        INSIGHTS_WAREHOUSE_DSN=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         INSIGHTS_DIRECTORY_URL="http://127.0.0.1:8081",
         INSIGHTS_SINK_DIR=str(_sink_dir()),
         # The local stand-in for AWS Secrets Manager. Same path shape, same
@@ -850,7 +900,6 @@ def cmd_run(args) -> int:
         INSIGHTS_WAREHOUSE_PATH=str(platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"),
         INSIGHTS_APP_MANIFEST=str(manifest.path),
         INSIGHTS_APP=manifest.app,
-        INSIGHTS_TEMPLATES=str(platform / "runtime" / "base-image" / "design-system"),
         INSIGHTS_OUTPUT_DIR=str(platform / "runtime" / "outputs"),
         PYTHONPATH=_pythonpath(platform),
     )
@@ -863,7 +912,21 @@ def cmd_run(args) -> int:
 # --------------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="insights", description="Insights Hub platform CLI")
+    """One command, two audiences - and the help says which is which.
+
+    `insights-sdk` is what a tenant imports and runs; `insights-platform` is what runs
+    beside their app. The CLI ships in the SDK because `doctor` must validate a
+    manifest with exactly the code the app will run. Grouping the help is how we stop
+    that being confusing.
+    """
+    parser = argparse.ArgumentParser(
+        prog="insights",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "YOUR APP        new-app · doctor · connections · serve · run · logs · build\n"
+            "THE PLATFORM    up · status · compliance-report\n"
+        ),
+    )
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -902,6 +965,11 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("-n", "--lines", type=int, default=40)
     logs.add_argument("--json", action="store_true", help="raw records, for piping to jq")
     logs.set_defaults(func=cmd_logs)
+
+    serve = sub.add_parser("serve", help="run THIS web app against a running platform")
+    serve.add_argument("--port", type=int, help="bind here instead of picking a free port")
+    serve.add_argument("--edge", type=int, default=8080, help="the platform's edge port")
+    serve.set_defaults(func=cmd_serve)
 
     up = sub.add_parser("up", help="start the local platform")
     up.add_argument("--port", type=int, default=8080,
@@ -972,6 +1040,9 @@ def _local_defaults() -> None:
 
     for key, value in (
         ("INSIGHTS_ENV", "local"),
+        # Both `up` and `serve` must land on the SAME token, or the app refuses every
+        # header the edge injects and every caller arrives anonymous.
+        ("INSIGHTS_EDGE_TOKEN", "local-edge-token"),
         ("INSIGHTS_REGISTRY_DIR", str(_registry())),
         ("INSIGHTS_SECRET_DIR", str(platform / "runtime" / "fakes" / "secret-store")),
         ("INSIGHTS_DIRECTORY_URL", "http://127.0.0.1:8081"),

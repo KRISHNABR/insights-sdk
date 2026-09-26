@@ -37,7 +37,7 @@ def test_every_command_is_registered_and_has_a_handler():
     commands = set(subparsers[0].choices)
 
     expected = {
-        "new-app", "doctor", "connections", "status", "up", "run", "logs",
+        "new-app", "doctor", "connections", "status", "up", "serve", "run", "logs",
         "build", "compliance-report", "upgrade-scaffold",
     }
     assert expected <= commands, f"missing commands: {expected - commands}"

@@ -74,10 +74,11 @@ connections: []
 WEB_BLOCK = """
 web:
   route: /{name}
-  type: api                     # api | spa
-                                #   api  JSON only
-                                #   spa  your own frontend in static/, served from the
-                                #        same origin. We serve it; we do not build it
+  type: spa                     # api | spa
+                                #   spa  your frontend in static/, served from the
+                                #        SAME origin as your API - which is what lets
+                                #        the browser hold nothing but a session cookie
+                                #   api  JSON only, no frontend
 """
 
 JOB_BLOCK = """
@@ -133,10 +134,91 @@ insights-sdk = {{ git = "{PLATFORM_ORG}/insights-sdk.git", tag = "{PLATFORM_REF}
 pythonpath = ["src"]
 """
 
-WEB_MAIN = '''\
-"""{name} — a web app on Insights Hub."""
+INDEX_HTML = """<!doctype html>
+<meta charset="utf-8">
+<title>{name}</title>
+<!--
+  Your frontend. Plain HTML and one <script> - no build step, no bundler, no npm.
 
-from insights_sdk import current_user, get_logger, query, require_role, web_app
+  The only thing worth noticing: there is NO authentication code here and no token
+  anywhere. fetch() is same-origin, so the session cookie the platform's front door
+  set rides along automatically. A token in JavaScript is a token in the DOM.
+
+  Replace all of this. The platform serves whatever is in static/; it does not build
+  it, and it has no opinion about your framework.
+-->
+<style>
+  :root {{ --bg:#ffffff; --panel:#fbf8fa; --line:#e7e1e5; --line-soft:#f0ebee;
+           --text:#1f1c20; --dim:#78707a; --accent:#c2417a; --pink-wash:#fdf5f9 }}
+  * {{ box-sizing:border-box }}
+  body {{ margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace }}
+  header {{ padding:18px 24px; border-bottom:1px solid var(--line); background:var(--pink-wash);
+            display:flex; align-items:baseline; gap:14px; flex-wrap:wrap }}
+  h1 {{ font-size:15px; margin:0; letter-spacing:.05em }}
+  .who {{ color:var(--dim); font-size:12px }}
+  main {{ padding:24px; max-width:900px }}
+  table {{ border-collapse:collapse; width:100%; font-size:13px }}
+  th {{ text-align:left; color:var(--dim); font-weight:400;
+        padding:6px 14px 6px 0; border-bottom:1px solid var(--line) }}
+  td {{ padding:8px 14px 8px 0; border-bottom:1px solid var(--line-soft) }}
+  .note {{ color:var(--dim); font-size:12px; max-width:62ch; margin:0 0 20px }}
+  .err {{ color:#f85149 }}
+</style>
+
+<header>
+  <h1>{upper}</h1>
+  <span class="who" id="who">...</span>
+</header>
+
+<main>
+  <p class="note">
+    This page is <code>static/index.html</code> in your repo. It calls your own API
+    below. There is no login code in it &mdash; the platform handled that before your
+    app was reached.
+  </p>
+  <div id="out">loading...</div>
+</main>
+
+<script>
+const out = document.getElementById('out');
+const esc = (s) => String(s ?? '').replace(/[<>&]/g, c => ({{'<':'&lt;','>':'&gt;','&':'&amp;'}}[c]));
+
+// Who the platform says you are. No token, no header - just the session cookie.
+fetch('api/me').then(r => r.json()).then(me => {{
+  document.getElementById('who').textContent =
+    me.trusted ? `${{me.subject}} · ${{me.groups.join(', ')}}` : 'not signed in';
+}});
+
+// Your own endpoint. Change this to whatever you built.
+fetch('api/hello')
+  .then(r => r.ok ? r.json() : Promise.reject(r.status))
+  .then(data => {{
+    const rows = Array.isArray(data) ? data : [data];
+    const cols = [...new Set(rows.flatMap(Object.keys))];
+    out.innerHTML = `<table><tr>${{cols.map(c => `<th>${{esc(c)}}</th>`).join('')}}</tr>` +
+      rows.map(r => `<tr>${{cols.map(c => `<td>${{esc(r[c])}}</td>`).join('')}}</tr>`).join('') +
+      `</table>`;
+  }})
+  .catch(err => {{
+    out.innerHTML = `<p class="err">api/hello returned ${{esc(err)}}</p>
+      <p class="note">If that is 401, sign in first by adding
+      <code>?as=you@corp.example</code> to this URL once.</p>`;
+  }});
+</script>
+"""
+
+WEB_MAIN = '''\
+"""{name} — a web app on Insights Hub.
+
+Two files are yours: this one and app.yaml. The frontend in static/ is yours too,
+and the platform only serves it.
+
+What is NOT here, and never needs to be: login, session handling, a credential, a
+host, logging setup, or a health endpoint.
+"""
+
+from insights_sdk import connect, current_user, get_logger, require_role, web_app
 
 app = web_app()          # login, identity, structured logs, metrics and /healthz
 log = get_logger()
@@ -144,18 +226,31 @@ log = get_logger()
 
 @app.get("/api/me")
 def me() -> dict:
+    """Who the platform says you are. The UI in static/ calls this."""
     caller = current_user()
-    return {{"you": caller.subject, "groups": list(caller.groups)}}
+    return {{"subject": caller.subject, "groups": list(caller.groups), "trusted": caller.trusted}}
 
 
-# Add a dataset to app.yaml, then read it like this. No connection, no credential,
-# no table name — `your.dataset` resolves differently in each environment:
+@app.get("/api/hello")
+def hello() -> list[dict]:
+    """Replace me. The UI renders whatever this returns as a table."""
+    require_role("reader")       # 403 unless they are listed in app.yaml
+    caller = current_user()
+    log.info("hello", groups=len(caller.groups))
+    return [
+        {{"app": "{name}", "you": caller.subject, "status": "it works"}},
+    ]
+
+
+# READING YOUR OWN DATA
+#
+# Declare the connection in app.yaml, then:
 #
 #     @app.get("/api/rows")
 #     def rows() -> dict:
-#         require_role("{name}-viewer")
-#         data = query("your.dataset", "SELECT * FROM your.dataset LIMIT 10")
-#         log.info("read", rows=len(data))     # log the SHAPE, never the rows
+#         require_role("reader")
+#         data = connect("my-warehouse").query("SELECT * FROM my_table LIMIT 10")
+#         log.info("read", rows=len(data))     # the SHAPE, never the rows
 #         return {{"rows": data}}
 '''
 
@@ -519,7 +614,7 @@ uv run insights upgrade-scaffold             # update them, then review the diff
 | It started, something is off | `insights logs --app {name}` |
 | A query is failing | `insights connections --probe` |
 | Is it even deployed? | `insights status` |
-| What has it been doing? | the console, at `/a/console/` |
+| What has it been doing? | the console, at `/apps/console/` |
 
 A connection error tells you **who fixes it**: an expired credential is yours, a TLS
 or VPC routing failure is ours. If it says ours, tell us and paste the error.
@@ -580,7 +675,7 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
     view = SimpleNamespace(
         app=name,
         kind=kind,
-        web=SimpleNamespace(type="api") if kind == "web" else None,
+        web=SimpleNamespace(type="spa") if kind == "web" else None,
         system_packages=(),
     )
 
@@ -592,6 +687,9 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
             name=name, PLATFORM_ORG=PLATFORM_ORG, PLATFORM_REF=PLATFORM_REF
         ),
         Path("src/main.py"): (JOB_MAIN if kind == "job" else WEB_MAIN).format(name=name),
+        **({} if kind == "job" else {
+            Path("static/index.html"): INDEX_HTML.format(name=name, upper=name.upper()),
+        }),
         Path("README.md"): README.format(name=name, kind=kind, team=team),
         Path(".gitignore"): GITIGNORE,
         # Generated once, then yours. Not in PLATFORM_OWNED, so `upgrade-scaffold`
