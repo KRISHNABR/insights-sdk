@@ -8,9 +8,9 @@ Install it and you have the whole platform surface:
 from insights_sdk import web_app, job, query, fetch, get_logger, current_user, require_role
 ```
 
-**Read the platform docs first:** [`insights-platform`](../insights-platform) —
-[ONBOARDING.md](../insights-platform/ONBOARDING.md) for day one,
-[docs/ARCHITECTURE.md](../insights-platform/docs/ARCHITECTURE.md) for how it works.
+**Read the platform docs first:** [`insights-platform`](https://github.com/KRISHNABR/insights-platform) —
+[ONBOARDING.md](https://github.com/KRISHNABR/insights-platform/blob/main/ONBOARDING.md) for day one,
+[docs/ARCHITECTURE.md](https://github.com/KRISHNABR/insights-platform/blob/main/docs/ARCHITECTURE.md) for how it works.
 
 ## Why the CLI lives in here
 
@@ -60,4 +60,4 @@ ADR claim into evidence:
 
 Semantic. Tenants declare a **floor** (`>=0.1,<1`), never a pin — the manifest loader
 rejects `==`. The platform supports the current major and two before it. See
-[ADR-001](../insights-platform/docs/adr/ADR-001-reuse-and-upgrade.md).
+[ADR-001](https://github.com/KRISHNABR/insights-platform/blob/main/docs/adr/ADR-001-reuse-and-upgrade.md).
