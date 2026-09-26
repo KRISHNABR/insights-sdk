@@ -46,10 +46,22 @@ def test_a_valid_edge_assertion_is_believed(platform, as_app):
         assert query("hr.headcount", "SELECT dept FROM hr.headcount")
 
 
-def test_require_role_refuses_a_trusted_caller_without_the_role(platform):
-    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
-        with pytest.raises(AuthzError):
-            identity.require_role("comp-analyst")
+def test_require_role_refuses_a_trusted_caller_outside_every_tier(platform, as_app):
+    """Trusted is not the same as authorized. The caller's identity is real and the
+    edge vouched for it; they are simply not listed on this app."""
+    as_app("app-web.yaml")
+    with signed_in("outsider@corp.example", "MG-SOMEWHERE-ELSE"):
+        with pytest.raises(AuthzError, match="not a reader"):
+            identity.require_role("reader")
+
+
+def test_an_owner_satisfies_every_tier(platform, as_app):
+    """The tiers nest. An owner who had to be listed as a reader too would be listed
+    three times, and forgotten once."""
+    as_app("app-web.yaml")
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):     # the owner group
+        for tier in ("owner", "contributor", "reader"):
+            assert identity.require_role(tier).subject == "krishna@corp.example"
 
 
 def test_a_job_acts_as_itself(platform, as_app):

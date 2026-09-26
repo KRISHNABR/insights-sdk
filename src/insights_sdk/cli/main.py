@@ -269,6 +269,11 @@ def cmd_doctor(args) -> int:
     # The Dockerfile is the tenant's file now, so staleness is the one thing the
     # platform cannot fix for them. Say it here, where it costs nothing, rather than
     # only in CI on the day they deploy.
+    #
+    # Note what we do NOT do: compare it to anything in app.yaml. The FROM line is
+    # the only statement of which base this app builds on. There used to be a
+    # `runtime.base` too, and a CI rule that the two must agree - a reconciliation
+    # between two sources of truth that should only ever have been one.
     dockerfile = manifest.path.parent / "Dockerfile"
     if not dockerfile.is_file():
         print(_bad("no Dockerfile. It belongs to this repo - run `insights build --write`"))
@@ -276,21 +281,28 @@ def cmd_doctor(args) -> int:
     else:
         froms = [ln.strip() for ln in dockerfile.read_text().splitlines()
                  if ln.strip().upper().startswith("FROM ")]
-        current = scaffold.BASE_VERSIONS.get(manifest.base)
-        expected = f"insights-hub/{manifest.base}:{current}"
         if not froms:
             print(_bad("Dockerfile has no FROM"))
             problems += 1
-        elif froms[-1].split()[1] != expected:
-            print(_bad(f"Dockerfile builds on {froms[-1].split()[1]}, current is {expected}"))
-            print("        base images carry the OS and interpreter patches. Because this")
-            print("        file is yours, that fix arrives only when you bump the line.")
-            problems += 1
         else:
-            print(_ok(f"Dockerfile on {expected} (current)"))
+            image = froms[-1].split()[1]
+            base, _, pinned = image.partition("insights-hub/")[2].partition(":")
+            current = scaffold.BASE_VERSIONS.get(base)
+            if current is None:
+                print(_bad(f"Dockerfile builds on {image} - not a published base"))
+                problems += 1
+            elif pinned != current:
+                print(_bad(f"Dockerfile pins {base}:{pinned}, current is {current}"))
+                print("        base images carry the OS and interpreter patches. Because this")
+                print("        file is yours, that fix arrives only when you bump the line.")
+                problems += 1
+            else:
+                print(_ok(f"Dockerfile on {base}:{pinned} (current)"))
 
-    if manifest.sdk_floor and "==" not in manifest.sdk_floor:
-        print(_ok(f"sdk floor {manifest.sdk_floor} (supported: {', '.join(__import__('insights_sdk').SUPPORTED_VERSIONS)})"))
+    # The SDK version is pyproject.toml's to state and uv.lock's to pin, and uv
+    # enforces it on every build. Reporting it here is informational only - there is
+    # nothing left for this command to catch that `uv sync` would not.
+    print(_ok(f"sdk {__version__} (supported: {', '.join(__import__('insights_sdk').SUPPORTED_VERSIONS)})"))
 
     print(f"\n{'no problems' if not problems else f'{problems} problem(s)'}")
     return 1 if problems else 0
@@ -593,10 +605,11 @@ def cmd_up(args) -> int:
         # layer 1 - so it has to be reconciled into the registry here rather than the
         # edge re-reading every tenant's manifest. In production the deploy pipeline
         # does exactly this step.
-        groups = sorted({
-            *manifest.manage.owners, *manifest.manage.contributors, *manifest.manage.readers,
-            *(g for role in manifest.roles for g in role.groups),
-        })
+        # Every group that may reach this app at all. Since `access.roles` was
+        # removed, that is exactly the union of the three management tiers - which
+        # `manage.everyone` already computes, so the edge's table and `require_role`
+        # cannot disagree about who is listed.
+        groups = sorted(manifest.manage.everyone)
         registry[manifest.app] = {
             "team": manifest.team, "kind": manifest.kind, "sdk": __version__,
             "path": str(manifest_path.parent), "schedule": manifest.schedule,
@@ -841,9 +854,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _local_defaults() -> None:
+    """Set the environment the platform injects at deploy, for local commands.
+
+    `up` and `run` already did this, which meant `insights doctor` failed on a
+    manifest referring to ${INSIGHTS_DIRECTORY_URL} - correct behaviour at the wrong
+    moment, since in CI and in production that variable IS set. Doctor's whole claim
+    is that it checks what CI checks, so it has to run in the same environment CI
+    does.
+
+    Only ever defaults: anything already exported wins, so pointing at a sandbox
+    still works.
+    """
+    platform = _platform()
+    for key, value in (
+        ("INSIGHTS_ENV", "local"),
+        ("INSIGHTS_REGISTRY_DIR", str(_registry())),
+        ("INSIGHTS_SECRET_DIR", str(platform / "runtime" / "fakes" / "secret-store")),
+        ("INSIGHTS_DIRECTORY_URL", "http://127.0.0.1:8081"),
+        ("INSIGHTS_SINK_DIR", str(_sink_dir())),
+        ("INSIGHTS_OUTPUT_DIR", str(platform / "runtime" / "outputs")),
+    ):
+        os.environ.setdefault(key, value)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        _local_defaults()
         return args.func(args)
     except InsightsError as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)

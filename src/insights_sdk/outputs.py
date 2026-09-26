@@ -1,14 +1,19 @@
 """What a job produces.
 
-A job that only logs is a job nobody can use. But a job that writes wherever it
-likes is a job the platform cannot govern - so outputs are declared in app.yaml
-and addressed by name:
+    output("weekly-equity-summary", rows)            # csv, the default
+    output("weekly-equity-summary", rows, "json")
 
-    output("weekly-equity-summary", rows)
+The tenant names the artefact; the platform decides where it physically lives and
+when it expires. Locally a directory; on AWS an S3 prefix scoped to the app, with a
+lifecycle rule from the platform's default retention.
 
-The tenant names the artefact. The platform decides where it physically lives,
-who can read it, and when it expires - the same "declare, don't wire" rule that
-governs data access, applied to the other direction.
+THERE USED TO BE AN `outputs:` BLOCK in app.yaml declaring each artefact's name,
+kind, format and retention, and `output()` refused anything not listed. It was
+removed. The declaration bought one thing - a per-artefact retention - and cost a
+block of ceremony in every job manifest plus a failure mode where the job runs,
+computes, and then throws away the result because a name did not match. A platform
+default that a team can override when they actually have a retention requirement is
+the better trade at this size.
 """
 
 from __future__ import annotations
@@ -24,15 +29,10 @@ from . import config, telemetry
 from .errors import ManifestError
 
 
-def _spec(name: str) -> dict:
-    manifest = config.manifest()
-    for declared in manifest.outputs:
-        if declared.get("name") == name:
-            return declared
-    raise ManifestError(
-        f"'{name}' is not a declared output. Add it to the `outputs:` block of app.yaml - "
-        f"the platform needs to know its retention and who may read it before it will store it."
-    )
+#: How long the platform keeps an artefact unless a team says otherwise. Ninety days
+#: because that is one quarter plus a margin - long enough for "last quarter's report"
+#: and short enough that nobody treats this as a data store.
+DEFAULT_RETENTION = "90d"
 
 
 def _serialise(rows: Sequence[dict], fmt: str) -> bytes:
@@ -47,16 +47,15 @@ def _serialise(rows: Sequence[dict], fmt: str) -> bytes:
     return buffer.getvalue().encode()
 
 
-def output(name: str, rows: Sequence[dict]) -> str:
-    """Write a declared output. Returns the location, for the log - not for reuse.
+def output(name: str, rows: Sequence[dict], fmt: str = "csv") -> str:
+    """Write an artefact. Returns the location, for the log - not for reuse.
 
-    Locally this is a directory; on AWS it is an S3 prefix scoped to the app with
-    a lifecycle rule built from `retention`. Tenant code is identical either way,
-    because it never names a destination.
+    Tenant code never names a destination, which is what keeps it identical in local,
+    dev and prod.
     """
-    spec = _spec(name)
+    if fmt not in ("csv", "json"):
+        raise ManifestError(f"output format must be csv or json, got {fmt!r}")
     manifest = config.manifest()
-    fmt = spec.get("format", "csv")
     payload = _serialise(rows, fmt)
 
     root = Path(os.environ.get("INSIGHTS_OUTPUT_DIR", "outputs"))
@@ -67,6 +66,6 @@ def output(name: str, rows: Sequence[dict]) -> str:
     # Row count and size, never content - the same rule as every other log record.
     telemetry.get_logger().info(
         "output_written", output=name, format=fmt, rows=len(rows),
-        bytes=len(payload), retention=spec.get("retention", "-"),
+        bytes=len(payload), retention=DEFAULT_RETENTION,
     )
     return str(destination)

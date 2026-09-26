@@ -51,8 +51,6 @@ access:
   manage:
     owners: [MG-DEMO]
 runtime:
-  sdk: ">=0.1,<1"
-  base: python-data
 connections:
   - name: declared-one
     engine: sqlite

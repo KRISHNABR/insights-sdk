@@ -16,7 +16,9 @@ from insights_sdk.cli import scaffold
 
 
 def _view(base="python-data", web=None, system=()):
-    return SimpleNamespace(app="demo", base=base, web=web, system_packages=system)
+    """`default_base`, not `base`: the manifest no longer carries one. It is derived
+    from `kind` when a Dockerfile is GENERATED, and after that the FROM line owns it."""
+    return SimpleNamespace(app="demo", default_base=base, web=web, system_packages=system)
 
 
 def test_the_generated_dockerfile_pins_a_published_base():

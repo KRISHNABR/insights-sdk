@@ -32,8 +32,6 @@ access:
   manage:
     owners: [MG-DEMO]
 runtime:
-  sdk: ">=0.1,<1"
-  base: python-data
 connections:
   - name: team-warehouse
     engine: sqlite
@@ -75,8 +73,6 @@ access:
   manage:
     owners: [MG-DEMO]
 runtime:
-  sdk: ">=0.1,<1"
-  base: python-data
 connections:
   - name: warehouse
     engine: postgres

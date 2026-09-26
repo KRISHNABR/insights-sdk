@@ -27,8 +27,11 @@ the rest is a thin wrapper around somebody else's client.
 
 from __future__ import annotations
 
+import os
+import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from . import secrets, telemetry
@@ -47,6 +50,36 @@ class ConnectionFailed(InsightsError):
         super().__init__(message)
         self.connection = connection
         self.kind = kind
+
+
+def _expand(value: Any, connection: str) -> Any:
+    """Substitute ${VAR} from the environment in a connection option.
+
+    How one manifest describes a connection whose host differs per environment,
+    without the file carrying three copies or the platform inventing a templating
+    language. Done at CONNECT time, not load time: reading a manifest must not
+    require the environment the app will run in.
+
+    Only ever a host, path or URL - never a credential. A credential here would be an
+    environment variable, readable by anything that can see the process. Those go
+    through `secret:` and are fetched at the point of use.
+    """
+    if not isinstance(value, str) or "${" not in value:
+        return value
+
+    def swap(match: "re.Match[str]") -> str:
+        key = match.group(1)
+        if key not in os.environ:
+            raise ConnectionFailed(
+                f"connection '{connection}' refers to ${{{key}}}, which is not set. "
+                f"The platform injects INSIGHTS_* at deploy; export it yourself to run "
+                f"locally.",
+                connection=connection,
+                kind="config_missing",
+            )
+        return os.environ[key]
+
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", swap, value)
 
 
 class Connector(Protocol):
@@ -256,7 +289,16 @@ def connect(name: str, *, manifest=None) -> Connector:
         )
 
     spec = declared[name]
+
+    # A relative path in a connection resolves against the MANIFEST, not the process
+    # working directory. A web app's uvicorn runs in <repo>/src and a job runs in
+    # <repo>, so a cwd-relative path works for one and not the other - and which one
+    # you hit depends on how the app was started, which is the worst kind of bug.
+    options = {k: _expand(v, name) for k, v in spec.options.items()}
+    if "path" in options and not Path(str(options["path"])).is_absolute():
+        options["path"] = str((manifest.path.parent / str(options["path"])).resolve())
+
     secret = secrets.resolve(manifest.app, spec.secret) if spec.secret else None
     factory = _ENGINES[spec.engine]
     telemetry.get_logger().info("connection_opened", connection=name, engine=spec.engine)
-    return factory(name=name, engine=spec.engine, config=dict(spec.options), secret=secret)
+    return factory(name=name, engine=spec.engine, config=options, secret=secret)

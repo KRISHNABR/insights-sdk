@@ -141,9 +141,28 @@ def require_trusted() -> Caller:
     return caller
 
 
-def require_role(role: str) -> Caller:
-    """Authorize the caller for an app-level role, e.g. one from `access.roles`."""
+def require_role(tier: str) -> Caller:
+    """Authorize the caller for one of this app's three access tiers.
+
+        require_role("reader")        # anyone the app lists, at any tier
+        require_role("contributor")   # contributors and owners
+        require_role("owner")         # owners only
+
+    It used to take an app-defined role name from `access.roles`. That block is gone:
+    two authorization vocabularies in one manifest meant every reader had to work out
+    which one a given check used, and in practice apps' roles restated these three.
+
+    The tiers NEST - an owner satisfies `require_role("reader")` - because the
+    alternative is every team remembering to list their owners in three places, and
+    forgetting once is a lockout that looks like a platform bug.
+    """
+    from . import config
+
     caller = require_trusted()
-    if not caller.has_role(role):
-        raise AuthzError(f"{caller.subject} is not a member of '{role}'")
+    allowed = set(config.manifest().manage.groups_for(tier))
+    if not (allowed & set(caller.groups)):
+        raise AuthzError(
+            f"{caller.subject} is not a {tier} of this app. "
+            f"Ask an owner to add your group to access.manage in app.yaml."
+        )
     return caller

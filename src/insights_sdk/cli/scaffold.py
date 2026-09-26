@@ -56,11 +56,20 @@ access:
   roles: []                     # e.g. {{name: {name}-viewer, groups: [{owner}]}}
 
 runtime:
-  sdk: ">=0.1,<1"               # a FLOOR, not a pin. `==` is rejected — see ADR-001
-  base: {base}                  # `insights runtimes` lists them. The platform patches these
-  size: small                   # small | medium | large
+  size: small                   # small | medium | large -> cpu/memory/replicas
 
-data: []                        # dataset names. `insights datasets` shows what you can ask for
+# The systems this app talks to. `secret:` is a NAME - the value lives in the secret
+# store, which your team writes and the platform team cannot read. A credential typed
+# here would be in git history forever, so the loader refuses one.
+#
+#   connections:
+#     - name: my-warehouse
+#       engine: databricks-sql  # databricks-sql | redshift | postgres | rest | sqlite
+#       host: ${{MY_WAREHOUSE_HOST}}
+#       secret: my-warehouse-token
+#
+#   rows = connect("my-warehouse").query("SELECT ...")
+connections: []
 {kind_block}
 environments:
   dev:  {{auto_deploy: true}}
@@ -389,8 +398,8 @@ def render_dockerfile(manifest) -> str:
     )
     return DOCKERFILE.format(
         name=manifest.app,
-        base=manifest.base,
-        base_version=BASE_VERSIONS.get(manifest.base, "0.1"),
+        base=manifest.default_base,
+        base_version=BASE_VERSIONS.get(manifest.default_base, "0.1"),
         extra_system=extra_system,
         extra_static=extra_static,
     )
@@ -437,7 +446,8 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
     # honest about the coupling and avoids a write-then-reparse dance.
     view = SimpleNamespace(
         app=name,
-        base=base,
+        kind=kind,
+        default_base=base,
         web=SimpleNamespace(type="api") if kind == "web" else None,
         system_packages=(),
     )

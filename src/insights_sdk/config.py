@@ -81,30 +81,47 @@ class DatasetRequest:
 
 
 @dataclass(frozen=True)
-class AppRole:
-    """A role the app checks at runtime, and the corporate groups behind it.
-
-    The platform reconciles `groups` into the edge's authorization table at deploy
-    time, so nobody hand-creates a group and nobody hand-checks membership.
-    """
-
-    name: str
-    groups: tuple[str, ...]
-    description: str = ""
-
-
-@dataclass(frozen=True)
 class Manage:
-    """Who may change, deploy and govern the app - the CONTROL plane.
+    """Who may do what with this app. Three tiers, and there is no fourth.
 
-    Deliberately separate from AppRole, which is the DATA plane. Being able to
-    deploy an app is not the same as being allowed to read what it reads, and
-    conflating the two is the most common way an internal platform leaks.
+    An earlier version had these PLUS an `access.roles` block where an app defined
+    its own named roles and mapped each to corporate groups. It was removed: two
+    authorization vocabularies in one file meant every reader had to work out which
+    one a given check used, and in practice every app's roles collapsed to some
+    restatement of these three anyway.
+
+    What it costs: an app can no longer express "only Finance may see the salary
+    tab" in the manifest. That is a real loss and it is the right trade here - with
+    the platform shipping connectors rather than brokering data, what a caller may
+    READ is decided by the data platform against their own identity, not by a role
+    this file invented.
+
+    The tiers nest: an owner can do anything a contributor can, and a contributor
+    anything a reader can. Encoded in `groups_for`, so nobody has to remember it.
     """
 
-    owners: tuple[str, ...] = ()          # prod approvers; the only group that may request data
-    contributors: tuple[str, ...] = ()    # dev/uat approvers; logs; no prod, no data requests
+    owners: tuple[str, ...] = ()          # prod approvers; may change access itself
+    contributors: tuple[str, ...] = ()    # dev/uat approvers; logs; no prod
     readers: tuple[str, ...] = ()         # status and telemetry only
+
+    #: Most-privileged first. The order IS the hierarchy.
+    TIERS = ("owner", "contributor", "reader")
+
+    def groups_for(self, tier: str) -> tuple[str, ...]:
+        """Every group that satisfies `tier`, including the ones above it."""
+        if tier not in self.TIERS:
+            raise ConfigError(
+                f"unknown access tier {tier!r}. This platform has exactly three: "
+                f"{', '.join(self.TIERS)}."
+            )
+        ladder = {"owner": (self.owners,),
+                  "contributor": (self.owners, self.contributors),
+                  "reader": (self.owners, self.contributors, self.readers)}
+        return tuple(dict.fromkeys(g for bucket in ladder[tier] for g in bucket))
+
+    @property
+    def everyone(self) -> tuple[str, ...]:
+        return self.groups_for("reader")
 
 
 @dataclass(frozen=True)
@@ -163,9 +180,6 @@ class Manifest:
     team: str
     kind: str                             # "web" | "job"
     manage: Manage
-    roles: tuple[AppRole, ...]
-    sdk_floor: str
-    base: str
     size: str
     system_packages: tuple[str, ...]
     datasets: tuple[DatasetRequest, ...]
@@ -185,8 +199,16 @@ class Manifest:
         return self.manage.owners
 
     @property
-    def role_names(self) -> tuple[str, ...]:
-        return tuple(r.name for r in self.roles)
+    def default_base(self) -> str:
+        """The base image a NEW app of this kind starts on.
+
+        Used only when generating a Dockerfile. After that the Dockerfile's own FROM
+        line is the source of truth and this is not consulted again - which is why
+        `runtime.base` no longer exists in the manifest. A job builds on python-data
+        because it has no web server, so a job cannot quietly become an unmonitored
+        API.
+        """
+        return "python-web" if self.kind == "web" else "python-data"
 
     @property
     def schedule(self) -> str | None:
@@ -251,6 +273,13 @@ def _parse_connection(entry: dict, target: Path) -> "ConnectionSpec":
             f"which the platform team cannot read."
         )
 
+    # ${VAR} placeholders are kept RAW here and expanded at connect() time.
+    #
+    # Loading a manifest must not require the runtime environment: `insights doctor`,
+    # the deploy gate and the console all read manifests, and none of them is the
+    # environment the app will run in. Expanding here made the gate fail on a
+    # perfectly valid manifest because CI had not exported a variable that only
+    # matters at runtime.
     options = {k: v for k, v in entry.items() if k not in ("name", "engine", "type", "secret")}
     return ConnectionSpec(
         name=name,
@@ -349,33 +378,35 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
                 f"individuals leave, and an app owned by someone who left is an orphan."
             )
 
-    roles = tuple(
-        AppRole(
-            name=r["name"],
-            groups=tuple(r.get("groups") or ()),
-            description=r.get("description", ""),
+    if access.get("roles"):
+        raise ManifestError(
+            f"{target}: `access.roles` was removed. This platform has exactly three "
+            f"tiers - owners, contributors, readers - and `require_role()` takes one "
+            f"of those. Refused rather than ignored: a silently-ignored roles block "
+            f"is a team believing an authorization rule is in force when it is not."
         )
-        for r in (access.get("roles") or [])
-    )
 
     # ---- runtime -------------------------------------------------------------
+    #
+    # `sdk` and `base` used to live here and no longer do. Both were second copies of
+    # something already stated elsewhere, and a second copy is a thing that drifts:
+    #
+    #   the SDK version   pyproject.toml and uv.lock already pin it, and uv enforces
+    #                     that on every build. A range here could disagree with the
+    #                     lockfile and nothing would notice.
+    #   the base image    the Dockerfile's FROM says it, and the tenant owns that file
+    #                     now (ADR-004). We had a CI rule that the two must AGREE -
+    #                     which is the smell: a reconciliation between two sources of
+    #                     truth that should have been one.
+    #
+    # `size` stays, because cpu/memory/replicas has nowhere else to be said.
     runtime = raw.get("runtime") or {}
-    floor = runtime.get("sdk")
-    if not floor:
-        raise ManifestError(f"{target}: runtime.sdk is required - declare a FLOOR such as '>=0.1,<1', not a pin")
-    if "==" in str(floor):
-        # ADR-001: pinning freezes an app on a version we will eventually stop supporting,
-        # and makes the upgrade story a negotiation instead of a default.
-        raise ManifestError(
-            f"{target}: runtime.sdk is pinned ({floor!r}). Declare a floor and a major bound, "
-            f"e.g. '>=0.1,<1', so patches and minors reach you automatically. See ADR-001."
-        )
-    base = runtime.get("base", "python-web" if kind == "web" else "python-data")
-    if base not in VALID_BASES:
-        raise ManifestError(
-            f"{target}: runtime.base {base!r} is not published. Run `insights runtimes`. "
-            f"You declare a runtime; you do not build an image."
-        )
+    for removed, where in (("sdk", "pyproject.toml"), ("base", "the Dockerfile's FROM line")):
+        if removed in runtime:
+            raise ManifestError(
+                f"{target}: runtime.{removed} was removed - {where} is the single source "
+                f"of truth for it now. Delete the line."
+            )
 
     # ---- kind-specific blocks: this is what makes `kind` mean something ------
     web = job = None
@@ -424,9 +455,6 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
         team=raw["team"],
         kind=kind,
         manage=manage,
-        roles=roles,
-        sdk_floor=str(floor),
-        base=base,
         size=runtime.get("size", "small"),
         system_packages=tuple(runtime.get("system_packages") or ()),
         datasets=datasets,
