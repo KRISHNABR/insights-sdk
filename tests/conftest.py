@@ -38,7 +38,7 @@ def _seed(db: Path) -> None:
                          [("2026-09", "Engineering", 999)])
         conn.executemany("INSERT INTO hr_compensation VALUES (?,?,?,?,?)",
                          [(1, "Krishna Murari", "People Ops", 94000, 8.0),
-                          (2, "Sam Whitfield", "People Analytics", 112000, 12.0)])
+                          (2, "Vidya Raman", "People Analytics", 112000, 12.0)])
         conn.executemany("INSERT INTO sales_pipeline VALUES (?,?,?)",
                          [("EMEA", "Acme Corp", 240000)])
     conn.close()

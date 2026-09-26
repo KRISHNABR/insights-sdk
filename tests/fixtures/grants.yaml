@@ -3,7 +3,7 @@ grants:
     app: comp-report
     access: read
     roles: [comp-analyst]          # the dataset owner grants the unmask, not the tenant
-    granted_by: sam@corp.example
+    granted_by: vidya@corp.example
     granted_at: "2026-09-20T09:14:00Z"
     expires_at: null
 break_glass: []

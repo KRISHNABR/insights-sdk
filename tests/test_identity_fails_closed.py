@@ -25,7 +25,7 @@ def test_a_client_cannot_assert_its_own_identity(platform):
 
 def test_groups_are_empty_without_trust(platform):
     """The structural guarantee: authorization fails closed as a data structure."""
-    untrusted = identity.Caller(subject="sam@corp.example", request_id="r", trusted=False,
+    untrusted = identity.Caller(subject="vidya@corp.example", request_id="r", trusted=False,
                                 _groups=("comp-analyst",))
     assert untrusted.groups == ()
     assert untrusted.has_role("comp-analyst") is False

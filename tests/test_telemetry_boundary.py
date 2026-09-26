@@ -37,7 +37,7 @@ def test_reading_restricted_data_arms_the_field_assertion(platform, as_app):
 
     log.info("startup", note="checking base_salary column exists")     # fine: nothing armed yet
 
-    with signed_in("sam@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
+    with signed_in("vidya@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
         query("hr.compensation", "SELECT employee_id FROM hr.compensation")
 
         with pytest.raises(RedactionError, match="base_salary"):

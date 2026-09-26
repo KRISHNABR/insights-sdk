@@ -105,7 +105,7 @@ def test_streamlit_gets_the_same_data_guarantees(platform, as_app):
     from conftest import signed_in
 
     as_app("app-streamlit.yaml")
-    with signed_in("sam@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
+    with signed_in("vidya@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
         assert query("hr.headcount", "SELECT dept FROM hr.headcount")      # declared
         with pytest.raises(EntitlementError):
             query("hr.compensation", "SELECT * FROM hr.compensation")      # not declared

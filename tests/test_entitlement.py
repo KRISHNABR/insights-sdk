@@ -58,7 +58,7 @@ def test_declaring_a_restricted_dataset_is_not_enough(platform, as_app):
 
 def test_a_granted_restricted_dataset_is_allowed(platform, as_app):
     as_app("app-job.yaml")
-    with signed_in("sam@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
+    with signed_in("vidya@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
         rows = query("hr.compensation", "SELECT employee_id FROM hr.compensation")
     assert len(rows) == 2
 

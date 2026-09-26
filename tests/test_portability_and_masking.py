@@ -29,9 +29,9 @@ def test_the_same_sql_reads_a_different_table_in_a_different_environment(platfor
 
 
 def test_a_caller_without_the_role_gets_masked_fields(platform, as_app):
-    """Raj is in People Analytics - so he reaches the dataset - but is not a comp-analyst."""
+    """Lokesh is in People Analytics - so he reaches the dataset - but is not a comp-analyst."""
     as_app("app-job.yaml")
-    with signed_in("raj@corp.example", "MG-PEOPLE-ANALYTICS"):
+    with signed_in("lokesh@corp.example", "MG-PEOPLE-ANALYTICS"):
         rows = query("hr.compensation", "SELECT employee_name, base_salary, dept FROM hr.compensation")
 
     assert rows[0]["employee_name"] == "***"
@@ -41,7 +41,7 @@ def test_a_caller_without_the_role_gets_masked_fields(platform, as_app):
 
 def test_a_caller_with_the_role_sees_the_values(platform, as_app):
     as_app("app-job.yaml")
-    with signed_in("sam@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
+    with signed_in("vidya@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
         rows = query("hr.compensation", "SELECT employee_name, base_salary FROM hr.compensation")
 
     assert rows[0]["employee_name"] == "Krishna Murari"
@@ -55,13 +55,13 @@ def test_masking_is_recorded_as_a_count_not_a_list(platform, as_app):
 
     as_app("app-job.yaml")
     with telemetry.capture() as records:
-        with signed_in("raj@corp.example", "MG-PEOPLE-ANALYTICS"):
+        with signed_in("lokesh@corp.example", "MG-PEOPLE-ANALYTICS"):
             query("hr.compensation", "SELECT employee_name, base_salary FROM hr.compensation")
 
     audit = [r for r in records if r["stream"] == "audit"][-1]
     assert audit["masked_fields"] == 2
     assert audit["classification"] == "restricted"
-    assert audit["caller"] == "raj@corp.example"
+    assert audit["caller"] == "lokesh@corp.example"
     assert "employee_name" not in str(audit)
 
 
