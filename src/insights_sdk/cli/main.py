@@ -865,8 +865,16 @@ def _local_defaults() -> None:
 
     Only ever defaults: anything already exported wins, so pointing at a sandbox
     still works.
+
+    Silently does nothing outside the workspace. `insights new-app` runs from an
+    empty directory by definition - there is no project yet, that is the point of it -
+    and an earlier version of this function raised there, so the very first command a
+    new team runs failed with "Run this from inside the insights-hub workspace".
     """
-    platform = _platform()
+    try:
+        platform = _platform()
+    except InsightsError:
+        return
     for key, value in (
         ("INSIGHTS_ENV", "local"),
         ("INSIGHTS_REGISTRY_DIR", str(_registry())),

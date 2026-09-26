@@ -131,3 +131,22 @@ def test_no_command_calls_a_name_that_does_not_exist():
                     missing.append(f"{node.name}() calls undefined name {inner.id!r}")
 
     assert not missing, "\n".join(sorted(set(missing)))
+
+
+def test_new_app_works_outside_the_workspace(tmp_path, monkeypatch):
+    """The FIRST command a new team runs, and it runs from an empty directory.
+
+    `_local_defaults()` resolves the platform checkout to point INSIGHTS_* at the local
+    fakes. It used to raise outside the workspace, and because it runs for every
+    command, `insights new-app` failed with "Run this from inside the insights-hub
+    workspace" - telling someone with no repo yet to go and get one.
+    """
+    from insights_sdk.cli.main import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INSIGHTS_REGISTRY_DIR", raising=False)
+
+    assert main(["new-app", "forecast", "--kind", "web",
+                 "--team", "demo", "--owner", "MG-DEMO"]) == 0
+    assert (tmp_path / "insights-forecast" / "app.yaml").is_file()
+    assert (tmp_path / "insights-forecast" / "Dockerfile").is_file()
