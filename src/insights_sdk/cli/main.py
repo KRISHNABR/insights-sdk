@@ -239,12 +239,27 @@ def cmd_doctor(args) -> int:
         print(_bad(f"manifest: {exc}"))
         return 1
 
-    try:
-        catalog = config.catalog()
-        grants = config.grants()
-    except InsightsError as exc:
-        print(_bad(f"registry: {exc}"))
-        return 1
+    # The registry is only needed to resolve `data:` entries - the older brokered
+    # model. An app that declares only `connections:` has nothing to look up, and a
+    # freshly generated app declares neither.
+    #
+    # Loading it unconditionally meant `insights doctor` in a brand new app failed
+    # with "Cannot locate the platform registry" - the second command a new team
+    # runs, failing on a file that is irrelevant to them.
+    catalog = grants = None
+    if manifest.datasets:
+        try:
+            catalog = config.catalog()
+            grants = config.grants()
+        except InsightsError as exc:
+            print(_bad(f"registry: {exc}"))
+            return 1
+
+    for connection in manifest.connections:
+        detail = f"{connection.engine}"
+        if connection.secret:
+            detail += f", secret '{connection.secret}'"
+        print(_ok(f"connection {connection.name} ({detail})"))
 
     for request in manifest.datasets:
         try:
