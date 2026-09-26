@@ -95,14 +95,16 @@ class Connector(Protocol):
 #: every driver spells these differently and none of them expose a stable code.
 _SIGNATURES = (
     ("auth",       ("authentication", "unauthorized", "401", "invalid credentials",
-                    "access denied", "permission denied", "403")),
+                    "access denied", "permission denied", "403",
+                    "using password: yes")),                        # mysql
     ("network",    ("connection refused", "could not connect", "name or service not known",
                     "temporary failure in name resolution", "no route to host", "econnrefused",
                     "unable to open database file", "could not translate host name")),
     ("timeout",    ("timed out", "timeout", "etimedout")),
     ("tls",        ("certificate", "ssl", "tls handshake")),
     ("not_found",  ("does not exist", "no such table", "not found", "404",
-                    "unknown database", "undefined table")),
+                    "unknown database", "undefined table",
+                    "table doesn't exist", "unknown column")),      # mysql
     ("syntax",     ("syntax error", "parse error", "near \"")),
 )
 
@@ -259,6 +261,7 @@ class RestConnector(_Base):
 
 _ENGINES = {
     "sqlite": SqlConnector,
+    "mysql": SqlConnector,
     "databricks-sql": SqlConnector,
     "redshift": SqlConnector,
     "postgres": SqlConnector,

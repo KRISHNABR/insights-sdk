@@ -48,7 +48,22 @@ class Caller:
         return self._groups if self.trusted else ()
 
     def has_role(self, role: str) -> bool:
-        return role in self.groups
+        """Deprecated. Checks a raw corporate group name.
+
+        It predates the three-tier model: a caller's groups are now compared against
+        `access.manage`, so a check against a bare group name bypasses the tier
+        hierarchy - an owner would fail `has_role("MG-X-READERS")` even though they
+        satisfy every reader check.
+
+        Kept working for a full major. Every call emits a telemetry record naming
+        this app and this symbol, so the migration can be watched rather than
+        assumed - see deprecation.py.
+        """
+        from .deprecation import deprecated
+
+        return deprecated(
+            since="0.2.0", removed_in="1.0.0", instead='require_role("reader")'
+        )(lambda: role in self.groups)()
 
     # `is_service` is a field set by whoever CONSTRUCTS the caller, not something
     # inferred from the subject string. It used to be `subject.startswith("svc:")`,

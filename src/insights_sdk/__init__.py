@@ -8,12 +8,12 @@ Anything not exported from this module is platform internals and may change in a
 release. Anything exported is covered by the support window in ADR-001.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 #: Versions still supported. The platform runs an N-2 window (ADR-001), so this is the
 #: list CI checks a tenant's declared floor against, and the list the deprecation
 #: telemetry is read against.
-SUPPORTED_VERSIONS = ("0.1.0",)
+SUPPORTED_VERSIONS = ("0.2.0", "0.1.0")
 
 from .entrypoints import job, run_job, web_app  # noqa: E402
 from .connectors import ConnectionFailed, connect  # noqa: E402
