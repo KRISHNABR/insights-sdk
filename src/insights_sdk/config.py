@@ -139,6 +139,7 @@ class Manifest:
     sdk_floor: str
     base: str
     size: str
+    system_packages: tuple[str, ...]
     datasets: tuple[DatasetRequest, ...]
     web: WebSpec | None
     job: JobSpec | None
@@ -324,6 +325,7 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
         sdk_floor=str(floor),
         base=base,
         size=runtime.get("size", "small"),
+        system_packages=tuple(runtime.get("system_packages") or ()),
         datasets=datasets,
         web=web,
         job=job,

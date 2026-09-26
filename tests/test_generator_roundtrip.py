@@ -50,6 +50,22 @@ def test_the_image_is_rendered_from_the_manifest(platform, as_app):
     assert "COPY static/" in rendered                        # because web.type is spa
 
 
+def test_the_image_installs_the_tenants_own_dependencies(platform, as_app):
+    """"Bring your code" has to include bringing your dependencies.
+
+    An earlier version copied src/ and app.yaml and nothing else, so a team adding
+    pandas to pyproject.toml had it locally and NOT in their image - the worst kind of
+    gap, because everything passes until it runs.
+    """
+    as_app("app-web.yaml")
+    rendered = scaffold.render_dockerfile(config.manifest())
+
+    assert "COPY pyproject.toml uv.lock" in rendered
+    assert "uv sync --frozen" in rendered            # the committed lock, or fail
+    # dependencies before source, so a code change does not reinstall everything
+    assert rendered.index("uv sync") < rendered.index("COPY src/")
+
+
 def test_the_job_image_has_no_web_server(platform, as_app):
     as_app("app-job.yaml")
     rendered = scaffold.render_dockerfile(config.manifest())

@@ -292,15 +292,24 @@ __pycache__/
 #: nothing can drift.
 DOCKERFILE = """\
 # Rendered by `insights build` from app.yaml. NOT stored in the tenant repo.
-#   app:      {name}
-#   base:     {base}
-#   packages: {packages}
+#   app:  {name}
+#   base: {base}
 #
-# Everything below is a consequence of what was declared. To change it, change app.yaml
-# — and if app.yaml cannot express what you need, that is a platform gap and we treat it
-# as a bug rather than as a request to work around (ADR-004).
+# Everything below is a consequence of what was declared. To change it, change
+# app.yaml or pyproject.toml - and if neither can express what you need, that is a
+# platform gap and we treat it as a bug rather than a request to work around (ADR-004).
 FROM insights-hub/{base}:{base_version}
-{extra_packages}COPY src/ /app/src/
+
+# Your dependencies, from YOUR pyproject.toml, installed from the COMMITTED lockfile.
+# --frozen means the lock must already be current: the image resolves exactly what your
+# laptop resolved, or the build fails. "Works on my machine" is not debuggable by a
+# platform team of three.
+#
+# Copied before your source so a code change does not reinstall the world.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+{extra_system}
+COPY src/ /app/src/
 COPY app.yaml /app/app.yaml
 {extra_static}"""
 
@@ -316,15 +325,24 @@ BASE_VERSIONS = {
 def render_dockerfile(manifest) -> str:
     """Render the image definition for an app, from what it declared.
 
-    This is the whole of "the platform standardises containerisation": a team says
-    `base: python-data` and gets a pinned, non-root image with the SDK already in it.
-    They never choose a base OS, a Python version, or a user id.
+    Three sources, and the split is the point:
+
+      runtime.base           the platform's runtime and the SDK   (ours)
+      pyproject.toml         the app's Python dependencies        (yours)
+      runtime.system_packages  apt-level needs, e.g. libgeos      (yours, declared)
+
+    A team never chooses a base OS, a Python version or a user id - but they own their
+    own dependency list, exactly as they would in any Python project. That is what
+    "bring your code" has to mean, or the platform is a cage.
     """
-    packages = tuple(getattr(manifest, "packages", ()) or ())
-    extra_packages = (
-        "\n# runtime.packages from app.yaml — the long tail, without a bespoke image\n"
-        f"RUN uv pip install --system --no-cache {' '.join(repr(p) for p in packages)}\n\n"
-        if packages
+    system = tuple(getattr(manifest, "system_packages", ()) or ())
+    extra_system = (
+        "\n# runtime.system_packages from app.yaml - the long tail, without a bespoke image\n"
+        "USER root\n"
+        f"RUN apt-get update && apt-get install -y --no-install-recommends {' '.join(system)} \\\n"
+        "    && rm -rf /var/lib/apt/lists/*\n"
+        "USER insights\n"
+        if system
         else ""
     )
     extra_static = (
@@ -336,8 +354,7 @@ def render_dockerfile(manifest) -> str:
         name=manifest.app,
         base=manifest.base,
         base_version=BASE_VERSIONS.get(manifest.base, "0.1"),
-        packages=", ".join(packages) or "none",
-        extra_packages=extra_packages,
+        extra_system=extra_system,
         extra_static=extra_static,
     )
 
