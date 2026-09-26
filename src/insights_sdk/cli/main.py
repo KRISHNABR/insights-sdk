@@ -605,6 +605,24 @@ def cmd_up(args) -> int:
         }
         if manifest.kind == "web":
             port += 1
+    # The console registers like any other app, on purpose.
+    #
+    # It is the platform team's own tool, and it goes through the edge, gets the same
+    # session cookie and the same group check as a tenant. If the edge breaks, the
+    # thing you would use to diagnose it breaks the same way - which is a far better
+    # bug to have than a console that works when nothing else does.
+    #
+    # `groups` is empty, which the edge reads as "any signed-in user". Deliberate: a
+    # tenant should be able to see their own app's health without asking us. There is
+    # nothing here to gate, because there is no tenant data in it.
+    registry["console"] = {
+        "team": "platform", "kind": "web", "sdk": __version__,
+        "path": str(platform / "runtime" / "console"), "schedule": None,
+        "restricted": False, "groups": [],
+        "port": port,
+    }
+    port += 1
+
     _apps_file(local=True).write_text(json.dumps(registry, indent=2) + "\n")
     print(f"registered {len(registry)} app(s) -> {_apps_file(local=True).name}")
 
@@ -653,11 +671,16 @@ def cmd_up(args) -> int:
     for name, entry in registry.items():
         if entry["kind"] != "web":
             continue
-        app_env = dict(env, INSIGHTS_APP_MANIFEST=str(Path(entry["path"]) / "app.yaml"), INSIGHTS_APP=name)
+        # A tenant app's code is in <repo>/src; the console lives directly in
+        # runtime/console and has no manifest of its own to point at.
+        source = Path(entry["path"]) if name == "console" else Path(entry["path"]) / "src"
+        app_env = dict(env, INSIGHTS_APP=name)
+        if name != "console":
+            app_env["INSIGHTS_APP_MANIFEST"] = str(Path(entry["path"]) / "app.yaml")
         procs.append(_spawn(
             name,
             [sys.executable, "-m", "uvicorn", "main:app", "--port", str(entry["port"]), "--log-level", "warning"],
-            Path(entry["path"]) / "src", app_env,
+            source, app_env,
         ))
         print(f"  {name} on :{entry['port']}")
 
@@ -689,6 +712,7 @@ def cmd_up(args) -> int:
 
     print(
         f"\nedge on http://localhost:{edge_port}\n"
+        f"  the console     http://localhost:{edge_port}/a/console/?as=suraj@corp.example\n"
         f"  the dashboard   http://localhost:{edge_port}/a/headcount-dashboard/?as=krishna@corp.example\n"
         f"  who am I        http://localhost:{edge_port}/a/headcount-dashboard/api/me\n"
         f"  the data        http://localhost:{edge_port}/a/headcount-dashboard/api/headcount?month=2026-09\n"
