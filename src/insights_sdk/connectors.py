@@ -82,6 +82,28 @@ def _expand(value: Any, connection: str) -> Any:
     return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", swap, value)
 
 
+#: Hosts that are this machine. Traffic to them must never go through an HTTP proxy.
+_LOOPBACK = ("127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0")
+
+
+def is_loopback(url: str) -> bool:
+    """Is this URL pointing at the machine we are running on?
+
+    On a corporate network HTTP_PROXY is usually set, and a proxy's bypass list often
+    contains `localhost` but not `127.0.0.1` - so half the platform's own traffic gets
+    sent to a proxy that (correctly) refuses to route it. The symptom is an app that
+    serves fine but fails every health check, which looks like a broken app.
+
+    Anything that talks to loopback therefore sets trust_env=False. In production a
+    tenant's REST connection may genuinely need the corporate proxy, so this is scoped
+    to loopback rather than turned off everywhere.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    return host in _LOOPBACK
+
+
 class Connector(Protocol):
     def query(self, sql: str, **params: Any) -> list[dict]: ...
 
@@ -253,6 +275,8 @@ class RestConnector(_Base):
         try:
             response = httpx.get(
                 self.config["base_url"],
+                # never proxy loopback - see is_loopback()
+                trust_env=not is_loopback(self.config["base_url"]),
                 headers=({"Authorization": f"Bearer {self.secret.reveal()}"}
                          if self.secret is not None else {}),
                 timeout=self.config.get("timeout", 20),
@@ -280,6 +304,7 @@ class RestConnector(_Base):
         url = self.config["base_url"].rstrip("/") + "/" + path.lstrip("/")
         try:
             response = httpx.get(url, params=params, headers=headers,
+                                 trust_env=not is_loopback(url),
                                  timeout=self.config.get("timeout", 20))
             response.raise_for_status()
             body = response.json()

@@ -176,3 +176,80 @@ def test_a_probe_against_a_dead_host_fails(platform, as_app, monkeypatch):
         with pytest.raises(ConnectionFailed) as exc:
             connect("team-warehouse").probe()
     assert exc.value.kind == "network"
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("http://127.0.0.1:8081", True),
+    ("http://localhost:8081/people", True),
+    ("http://[::1]:9000", True),
+    ("https://directory.internal.bms.com", False),
+    ("https://adb-123.azuredatabricks.net/sql", False),
+])
+def test_loopback_is_recognised(url, expected):
+    """A corporate HTTP_PROXY bypass list often has `localhost` but not `127.0.0.1`,
+    so half the platform's own traffic gets handed to a proxy that correctly refuses
+    to route it. Anything loopback must bypass the proxy; anything else must not,
+    because a tenant's real REST connection may genuinely need it."""
+    from insights_sdk.connectors import is_loopback
+
+    assert is_loopback(url) is expected
+
+
+def test_a_local_rest_connection_ignores_a_broken_http_proxy(tmp_path, monkeypatch):
+    """The regression, end to end: a real local HTTP server, a dead HTTP_PROXY, and a
+    REST connection that must still reach it.
+
+    Reported from a corporate laptop: the proxy bypass list had `localhost` but not
+    `127.0.0.1`, so every health check and every edge hop was handed to a proxy that
+    correctly refused to route loopback. The apps were fine; everything said they
+    were not.
+    """
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):                                   # noqa: N802
+            body = _json.dumps([{"dept": "Engineering"}]).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):                       # keep pytest output clean
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        (tmp_path / "app.yaml").write_text(f"""
+app: demo
+team: demo-team
+kind: job
+access:
+  manage:
+    owners: [MG-DEMO]
+runtime: {{size: small}}
+connections:
+  - name: directory
+    engine: rest
+    base_url: http://127.0.0.1:{port}
+job:
+  schedule: "0 6 * * MON"
+""")
+        monkeypatch.setenv("INSIGHTS_APP_MANIFEST", str(tmp_path / "app.yaml"))
+        # a proxy that nothing listens on: if the connector honours it, this fails
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+        monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        config.reset()
+
+        with signed_in("sp-demo"):
+            rows = connect("directory").query("/people")
+        assert rows == [{"dept": "Engineering"}]
+    finally:
+        server.shutdown()
+        config.reset()

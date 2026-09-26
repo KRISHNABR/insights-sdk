@@ -773,7 +773,12 @@ def cmd_up(args) -> int:
             continue
         for _ in range(60):                      # 15s, 250ms apart
             try:
-                urllib.request.urlopen(f"http://127.0.0.1:{entry['port']}/healthz", timeout=1)
+                # A no-proxy opener. urlopen honours HTTP_PROXY, so on a corporate
+                # network this health check was being sent to the corporate proxy,
+                # which refuses to route loopback - every app then "did not become
+                # healthy" while serving perfectly.
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                opener.open(f"http://127.0.0.1:{entry['port']}/healthz", timeout=1)
                 break
             except (urllib.error.URLError, OSError):
                 time.sleep(0.25)
