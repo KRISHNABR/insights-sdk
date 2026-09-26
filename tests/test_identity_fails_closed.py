@@ -6,7 +6,7 @@ someone remembered to check a flag, but because an untrusted caller has no group
 
 import pytest
 
-from insights_sdk import identity
+from insights_sdk import config, identity
 from insights_sdk import connect
 from insights_sdk.errors import AuthzError, IdentityError
 
@@ -75,3 +75,40 @@ def test_a_job_acts_as_itself(platform, as_app):
     assert service.subject == "sp-demo"
     assert service.trusted is True
     assert "MG-PEOPLE-ANALYTICS" in service.groups
+
+
+def test_a_tenant_cannot_declare_its_own_service_identity(platform, tmp_path, monkeypatch):
+    """Unattended work runs as `sp-<app>`, DERIVED from the registered app name.
+
+    If a team could name their own, they could claim another app's and inherit
+    whatever it can read. So there is no manifest field for it, and a manifest that
+    invents one is rejected rather than ignored - an ignored key is a team believing
+    something is configured.
+    """
+    from insights_sdk.errors import ManifestError
+
+    body = '''apiVersion: v1
+app: demo
+team: demo-team
+kind: job
+access:
+  manage:
+    owners: [MG-DEMO]
+runtime: {size: small}
+job:
+  schedule: "0 6 * * MON"
+'''
+    path = tmp_path / "app.yaml"
+    path.write_text(body)
+    monkeypatch.setenv("INSIGHTS_APP_MANIFEST", str(path))
+    config.reset()
+    assert config.manifest().service_identity == "sp-demo"
+
+    # ...and it cannot be overridden from the file, at the top level or nested.
+    for injected in ("service_identity: sp-someone-else\n",
+                     "runtime: {size: small, service_identity: sp-someone-else}\n"):
+        path.write_text(body.replace("runtime: {size: small}\n", "") + injected)
+        config.reset()
+        with pytest.raises(ManifestError):
+            config.manifest()
+    config.reset()

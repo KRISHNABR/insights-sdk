@@ -377,6 +377,37 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
                 f"individuals leave, and an app owned by someone who left is an orphan."
             )
 
+    # Unknown keys inside a BLOCK, not just at the top level.
+    #
+    # `service_identity: sp-someone-else` at the top level was refused, but nested
+    # under `runtime:` it was silently ignored - accepted, with no effect. The derived
+    # identity still won, so nothing was insecure; what broke is the rule this
+    # platform leans on everywhere: refuse, do not ignore. A key a team writes and the
+    # loader drops is a team believing something is configured.
+    _ALLOWED_IN = {
+        # `sdk` and `base` are listed so the dedicated "was removed, here is where it
+        # lives now" message below fires instead of a generic unknown-key error. A
+        # removed field deserves better than being told it is a typo.
+        "runtime": {"size", "system_packages", "sdk", "base"},
+        "web": {"route", "type", "health"},
+        "job": {"schedule", "timezone", "timeout", "retries", "concurrency",
+                "catchup", "on_failure", "schedule_enabled"},
+        # `roles` is listed for the same reason as runtime.sdk: so its dedicated
+        # removal message fires rather than a generic unknown-key error.
+        "access": {"manage", "roles"},
+    }
+    for block, allowed in _ALLOWED_IN.items():
+        body = raw.get(block)
+        if not isinstance(body, dict):
+            continue
+        unknown = sorted(set(body) - allowed)
+        if unknown:
+            raise ManifestError(
+                f"{target}: unknown key(s) {unknown} under `{block}:`. "
+                f"Allowed: {sorted(allowed)}. Refused rather than ignored - a key we "
+                f"drop is a key you think is doing something."
+            )
+
     if raw.get("environments"):
         raise ManifestError(
             f"{target}: `environments:` was removed. It said who approves a deploy and "
