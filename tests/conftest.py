@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from insights_sdk import config, identity, obs
+from insights_sdk import config, identity, telemetry
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EDGE_TOKEN = "test-edge-token"
@@ -54,10 +54,10 @@ def platform(tmp_path, monkeypatch):
     monkeypatch.setenv("INSIGHTS_EDGE_TOKEN", EDGE_TOKEN)
     monkeypatch.setenv("INSIGHTS_ENV", "local")
     config.reset()
-    obs.clear_sensitive_fields()
+    telemetry.clear_sensitive_fields()
     yield tmp_path
     config.reset()
-    obs.clear_sensitive_fields()
+    telemetry.clear_sensitive_fields()
 
 
 @pytest.fixture

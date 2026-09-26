@@ -1,7 +1,7 @@
 """Evidence for ADR-002: the alias earns its place, and masking follows the caller."""
 
 from insights_sdk import config
-from insights_sdk.data import query
+from insights_sdk.broker import query
 
 from conftest import signed_in
 
@@ -51,10 +51,10 @@ def test_a_caller_with_the_role_sees_the_values(platform, as_app):
 def test_masking_is_recorded_as_a_count_not_a_list(platform, as_app):
     """The audit stream is read by more people than the data is, so it records how many
     fields were masked and never which ones."""
-    from insights_sdk import obs
+    from insights_sdk import telemetry
 
     as_app("app-job.yaml")
-    with obs.capture() as records:
+    with telemetry.capture() as records:
         with signed_in("raj@corp.example", "MG-PEOPLE-ANALYTICS"):
             query("hr.compensation", "SELECT employee_name, base_salary FROM hr.compensation")
 
@@ -73,15 +73,14 @@ def test_a_job_sees_unmasked_fields_only_because_the_owner_granted_them(platform
     wrong, because that file is in the tenant's own repo. Instead the roles come from the
     grant, which only the dataset owner can write.
     """
-    from insights_sdk import config, identity, obs
-
+    from insights_sdk import config, identity, telemetry
     as_app("app-job.yaml")
     manifest = config.manifest()
     service = identity.Caller.service(manifest.service_subject, manifest.owners, "run-1")
 
     assert "comp-analyst" not in service.groups          # not in the app's owner groups
 
-    with obs.capture() as records:
+    with telemetry.capture() as records:
         with identity.as_caller(service):
             rows = query("hr.compensation", "SELECT base_salary FROM hr.compensation")
 

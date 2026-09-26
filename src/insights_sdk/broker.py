@@ -18,7 +18,7 @@ import re
 import time
 from typing import Any
 
-from . import config, engines, identity, obs
+from . import adapters, config, identity, telemetry
 from .config import Manifest, Resolved
 from .errors import EntitlementError, InsightsError
 
@@ -84,7 +84,7 @@ def _authorize(alias: str, expected_engine: str) -> tuple[Manifest, identity.Cal
             )
         # Teach the logger what must never appear in telemetry from this process. The list
         # comes from the platform catalog, so a tenant cannot shorten it (ADR-003).
-        obs.register_sensitive_fields(alias, resolved.dataset.sensitive_fields)
+        telemetry.register_sensitive_fields(alias, resolved.dataset.sensitive_fields)
 
     if resolved.connection.engine != expected_engine:
         raise InsightsError(
@@ -169,12 +169,12 @@ def _execute(alias: str, expected_engine: str, request: Any, sql_for_rewrite: st
         request = (sql, request)
 
     started = time.perf_counter()
-    rows = engines.engine_for(resolved).run(resolved, request)              # 7
+    rows = adapters.adapter_for(resolved).run(resolved, request)              # 7
     elapsed_ms = int((time.perf_counter() - started) * 1000)
 
     rows, masked_count = _mask(rows, resolved, roles)                       # 8
 
-    obs.audit_read(                                                         # 9
+    telemetry.audit_read(                                                         # 9
         dataset=alias,
         classification=_sensitivity(resolved),
         owner=resolved.dataset.owner,
@@ -209,11 +209,11 @@ def fetch(dataset: str, *, params: dict[str, Any] | None = None) -> list[dict]:
     resource = resolved.location["resource"]
 
     started = time.perf_counter()
-    rows = engines.engine_for(resolved).run(resolved, (resource, params or {}))
+    rows = adapters.adapter_for(resolved).run(resolved, (resource, params or {}))
     elapsed_ms = int((time.perf_counter() - started) * 1000)
 
     rows, masked_count = _mask(rows, resolved, roles)
-    obs.audit_read(
+    telemetry.audit_read(
         dataset=dataset,
         classification=_sensitivity(resolved),
         owner=resolved.dataset.owner,

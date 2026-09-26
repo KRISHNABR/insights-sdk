@@ -91,7 +91,7 @@ def _reject_sensitive_names(event: str, fields: dict[str, Any]) -> None:
 
 
 def _base_record(stream: str, level: str, event: str) -> dict[str, Any]:
-    from . import config  # local import: obs is loaded before a manifest may exist
+    from . import config  # local import: telemetry loads before a manifest may exist
 
     caller = current_user()
     record: dict[str, Any] = {

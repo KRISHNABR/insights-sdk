@@ -161,7 +161,7 @@ _ENGINES: dict[str, Engine] = {
 }
 
 
-def engine_for(resolved: Resolved) -> Engine:
+def adapter_for(resolved: Resolved) -> Engine:
     """Pick the adapter for this connection IN THIS ENVIRONMENT.
 
     A connection declares one logical engine - `databricks` - and the adapter

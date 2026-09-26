@@ -15,10 +15,10 @@ __version__ = "0.1.0"
 #: telemetry is read against.
 SUPPORTED_VERSIONS = ("0.1.0",)
 
-from .app import job, run_job, web_app  # noqa: E402
-from .data import fetch, query  # noqa: E402
+from .entrypoints import job, run_job, web_app  # noqa: E402
+from .broker import fetch, query  # noqa: E402
 from .identity import Caller, current_user, require_role, require_trusted  # noqa: E402
-from .obs import get_logger  # noqa: E402
+from .telemetry import get_logger  # noqa: E402
 from .outputs import output  # noqa: E402
 from .errors import (  # noqa: E402
     AuthzError,

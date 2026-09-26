@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import config, obs
+from . import config, telemetry
 from .errors import ManifestError
 
 
@@ -65,7 +65,7 @@ def output(name: str, rows: Sequence[dict]) -> str:
     destination.write_bytes(payload)
 
     # Row count and size, never content - the same rule as every other log record.
-    obs.get_logger().info(
+    telemetry.get_logger().info(
         "output_written", output=name, format=fmt, rows=len(rows),
         bytes=len(payload), retention=spec.get("retention", "-"),
     )

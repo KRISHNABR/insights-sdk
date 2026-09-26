@@ -100,7 +100,7 @@ def test_an_unsupported_web_shape_is_refused(platform, tmp_path):
 def test_streamlit_gets_the_same_data_guarantees(platform, as_app):
     """The point of the SDK being a library rather than a framework integration:
     a Streamlit app's entitlement is enforced by exactly the same code."""
-    from insights_sdk.data import query
+    from insights_sdk.broker import query
     from insights_sdk.errors import EntitlementError
     from conftest import signed_in
 

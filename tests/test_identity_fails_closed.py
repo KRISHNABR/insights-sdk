@@ -7,7 +7,7 @@ someone remembered to check a flag, but because an untrusted caller has no group
 import pytest
 
 from insights_sdk import identity
-from insights_sdk.data import query
+from insights_sdk.broker import query
 from insights_sdk.errors import AuthzError, IdentityError
 
 from conftest import EDGE_TOKEN, edge_headers, signed_in

@@ -2,7 +2,7 @@
 
 import warnings
 
-from insights_sdk import obs
+from insights_sdk import telemetry
 from insights_sdk.deprecation import deprecated
 
 
@@ -11,7 +11,7 @@ def test_a_deprecated_call_tells_the_platform_who_is_still_using_it(platform):
     def run_sql(x):
         return x
 
-    with obs.capture() as records:
+    with telemetry.capture() as records:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             run_sql(1)
@@ -30,7 +30,7 @@ def test_it_emits_once_per_symbol_not_once_per_call(platform):
     def old_fetch():
         return None
 
-    with obs.capture() as records:
+    with telemetry.capture() as records:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             for _ in range(100):

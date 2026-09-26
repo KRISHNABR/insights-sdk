@@ -14,7 +14,7 @@ import time
 import uuid
 from typing import Any, Callable
 
-from . import config, identity, obs
+from . import config, identity, telemetry
 from .errors import ConfigError, InsightsError
 
 # --------------------------------------------------------------------------------
@@ -63,7 +63,7 @@ def web_app(**fastapi_kwargs: Any):
         raise ConfigError(f"{manifest.app} is declared kind: {manifest.kind}, not web")
 
     application = FastAPI(title=manifest.app, **fastapi_kwargs)
-    log = obs.get_logger()
+    log = telemetry.get_logger()
 
     @application.middleware("http")
     async def _platform_context(request: Request, call_next):
@@ -137,7 +137,7 @@ def run_job(fn: Callable[[], Any], *, run_id: str | None = None) -> int:
 
     run_id = run_id or os.environ.get("INSIGHTS_RUN_ID") or f"run-{uuid.uuid4().hex[:10]}"
     caller = identity.Caller.service(manifest.service_subject, manifest.owners, run_id)
-    log = obs.get_logger()
+    log = telemetry.get_logger()
 
     draining = {"stop": False}
 

@@ -26,7 +26,7 @@ import inspect
 import warnings
 from typing import Any, Callable, TypeVar
 
-from .obs import get_logger
+from .telemetry import get_logger
 
 F = TypeVar("F", bound=Callable[..., Any])
 

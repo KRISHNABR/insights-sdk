@@ -3,7 +3,7 @@ restricted dataset is not enough on its own."""
 
 import pytest
 
-from insights_sdk.data import fetch, query
+from insights_sdk.broker import fetch, query
 from insights_sdk.errors import EntitlementError, InsightsError, UnknownDatasetError
 
 from conftest import signed_in
