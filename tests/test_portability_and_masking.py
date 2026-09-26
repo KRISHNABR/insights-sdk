@@ -16,7 +16,7 @@ def test_the_same_sql_reads_a_different_table_in_a_different_environment(platfor
     as_app("app-web.yaml")
     sql = "SELECT headcount FROM hr.headcount WHERE dept = :dept"
 
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         local = query("hr.headcount", sql, dept="Engineering")
 
         monkeypatch.setenv("INSIGHTS_ENV", "prod")
@@ -44,7 +44,7 @@ def test_a_caller_with_the_role_sees_the_values(platform, as_app):
     with signed_in("sam@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
         rows = query("hr.compensation", "SELECT employee_name, base_salary FROM hr.compensation")
 
-    assert rows[0]["employee_name"] == "Dana Okafor"
+    assert rows[0]["employee_name"] == "Krishna Murari"
     assert rows[0]["base_salary"] == 94000
 
 

@@ -12,7 +12,7 @@ from conftest import signed_in
 def test_an_undeclared_dataset_is_refused(platform, as_app):
     """`sales.pipeline` is a real dataset with real rows. This app did not declare it."""
     as_app("app-web.yaml")
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         with pytest.raises(EntitlementError, match="not entitled"):
             query("sales.pipeline", "SELECT * FROM sales.pipeline")
 
@@ -26,7 +26,7 @@ def test_a_nonexistent_dataset_is_indistinguishable_from_one_you_may_not_have(pl
     guessing names, which is discovery through the back door (ADR-002 s5).
     """
     as_app("app-web.yaml")
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         with pytest.raises(EntitlementError) as absent:
             query("hr.secrets", "SELECT * FROM hr.secrets")
         with pytest.raises(EntitlementError) as forbidden:
@@ -66,7 +66,7 @@ def test_a_granted_restricted_dataset_is_allowed(platform, as_app):
 def test_sql_cannot_reach_past_the_declared_dataset(platform, as_app):
     """Declare something harmless, then select from a table you were never granted."""
     as_app("app-web.yaml")
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         with pytest.raises(EntitlementError, match="belongs to dataset"):
             query(
                 "hr.headcount",
@@ -76,13 +76,13 @@ def test_sql_cannot_reach_past_the_declared_dataset(platform, as_app):
 
 def test_sql_must_reference_the_dataset_it_names(platform, as_app):
     as_app("app-web.yaml")
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         with pytest.raises(EntitlementError, match="does not reference"):
             query("hr.headcount", "SELECT 1")
 
 
 def test_the_wrong_verb_says_which_one_to_use(platform, as_app):
     as_app("app-web.yaml")
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         with pytest.raises(InsightsError, match=r"fetch\(\)"):
             query("directory.people", "SELECT * FROM directory.people")

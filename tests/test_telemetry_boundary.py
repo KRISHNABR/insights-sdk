@@ -11,7 +11,7 @@ from conftest import signed_in
 
 def test_a_log_record_cannot_carry_rows(platform):
     log = telemetry.get_logger()
-    rows = [{"employee_name": "Dana Okafor", "base_salary": 94000}]
+    rows = [{"employee_name": "Krishna Murari", "base_salary": 94000}]
     with pytest.raises(RedactionError, match="scalars"):
         log.info("debug", rows=rows)
 

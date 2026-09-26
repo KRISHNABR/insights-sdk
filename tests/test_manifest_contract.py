@@ -50,7 +50,7 @@ def test_an_app_must_have_an_owner_group(platform, tmp_path):
 
 def test_owners_must_be_groups_not_people(platform, tmp_path):
     """An app owned by someone who left is an orphan."""
-    body = {**BASE_WEB, "access": {"manage": {"owners": ["dana@corp.example"]}, "roles": []}}
+    body = {**BASE_WEB, "access": {"manage": {"owners": ["krishna@corp.example"]}, "roles": []}}
     with pytest.raises(ManifestError, match="individual"):
         config.load_manifest(write(tmp_path, body))
 

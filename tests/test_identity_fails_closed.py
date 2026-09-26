@@ -39,7 +39,7 @@ def test_an_app_run_outside_the_edge_can_read_nothing(platform, as_app):
 
 def test_a_valid_edge_assertion_is_believed(platform, as_app):
     as_app("app-web.yaml")
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS,headcount-viewer"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS,headcount-viewer"):
         caller = identity.current_user()
         assert caller.trusted is True
         assert caller.has_role("headcount-viewer")
@@ -47,7 +47,7 @@ def test_a_valid_edge_assertion_is_believed(platform, as_app):
 
 
 def test_require_role_refuses_a_trusted_caller_without_the_role(platform):
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         with pytest.raises(AuthzError):
             identity.require_role("comp-analyst")
 

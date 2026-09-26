@@ -465,7 +465,7 @@ def cmd_up(args) -> int:
 
     print(
         f"\nedge on http://localhost:{edge_port}\n"
-        f"  http://localhost:{edge_port}/a/headcount-dashboard/?as=dana@corp.example\n"
+        f"  http://localhost:{edge_port}/a/headcount-dashboard/?as=krishna@corp.example\n"
         f"  http://localhost:{edge_port}/a/headcount-dashboard/headcount?month=2026-09\n"
         f"\nctrl-c to stop"
     )

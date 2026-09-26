@@ -89,7 +89,7 @@ require_role(role: str) -> Caller # raises AuthzError if the caller lacks the ro
 
 ```python
 class Caller:
-    subject: str          # "dana@corp.example", or "svc:comp-report" for a scheduled run
+    subject: str          # "krishna@corp.example", or "svc:comp-report" for a scheduled run
     groups: tuple[str]    # EMPTY unless trusted — see below
     request_id: str
     trusted: bool

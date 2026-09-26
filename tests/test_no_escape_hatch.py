@@ -25,7 +25,7 @@ def test_neither_verb_can_return_a_connection(platform, as_app):
     from conftest import signed_in
 
     as_app("app-web.yaml")
-    with signed_in("dana@corp.example", "MG-PEOPLE-OPS"):
+    with signed_in("krishna@corp.example", "MG-PEOPLE-OPS"):
         rows = broker.query("hr.headcount", "SELECT dept FROM hr.headcount")
 
     assert isinstance(rows, list)
