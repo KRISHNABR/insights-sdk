@@ -44,13 +44,25 @@ def _registry() -> Path:
     return _platform() / "control" / "registry"
 
 
-def _apps_file() -> Path:
-    return _registry() / "apps.json"
+def _apps_file(local: bool = False) -> Path:
+    """Where the app registry lives.
+
+    `apps.json` is the real thing: CI appends to it when an app deploys, and it is
+    version-controlled because "what is deployed" is a fact worth reviewing.
+
+    `apps.local.json` is what `insights up` writes - the same shape, but with localhost
+    ports in it. Separate file so running the local stack never leaves the platform repo
+    dirty, and so nobody accidentally commits a port number as if it were a deployment.
+    """
+    return _registry() / ("apps.local.json" if local else "apps.json")
 
 
 def _registered() -> dict:
-    path = _apps_file()
-    return json.loads(path.read_text()) if path.is_file() else {}
+    for path in (_apps_file(local=True), _apps_file()):
+        if path.is_file():
+            body = json.loads(path.read_text())
+            return {k: v for k, v in body.items() if not k.startswith("_")}
+    return {}
 
 
 def _pythonpath(platform: Path) -> str:
@@ -368,8 +380,8 @@ def cmd_up(args) -> int:
         }
         if manifest.kind == "web":
             port += 1
-    _apps_file().write_text(json.dumps(registry, indent=2) + "\n")
-    print(f"registered {len(registry)} app(s) -> {_apps_file()}")
+    _apps_file(local=True).write_text(json.dumps(registry, indent=2) + "\n")
+    print(f"registered {len(registry)} app(s) -> {_apps_file(local=True).name}")
 
     env = dict(os.environ)
     env.update(
