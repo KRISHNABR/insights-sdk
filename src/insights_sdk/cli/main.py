@@ -175,34 +175,55 @@ def cmd_upgrade_scaffold(args) -> int:
 
 
 def cmd_build(args) -> int:
-    """Show, or run, the container build for this app.
+    """Build this app's image, or show what would be built.
 
-    The image is defined by the platform, not by the tenant - but "defined by the
-    platform" must not mean "hidden from the tenant". This prints exactly what we
-    would build, and can build it, so a team can reproduce and debug it without
-    the platform being involved.
+    The Dockerfile belongs to the repo now (ADR-004), so this builds YOUR file - it
+    does not render one behind your back. `--show` prints it, and if it is missing
+    prints the template `insights new-app` would have generated, so a repo that
+    predates the change can recover it with one redirect.
     """
     manifest = config.manifest()
-    dockerfile = scaffold.render_dockerfile(manifest)
+    root = manifest.path.parent
+    dockerfile = root / "Dockerfile"
 
-    if args.show:
-        print(f"# rendered from {manifest.path.name} — not written to this repo\n")
-        print(dockerfile)
+    if args.write:
+        # A subcommand rather than `--show > Dockerfile`, because that recipe
+        # destroys the file it is meant to create: the shell truncates the target
+        # before the command runs, so --show then reads back an empty file. Writing
+        # it here means the read and the write cannot race.
+        if dockerfile.is_file() and not args.force:
+            print(f"{dockerfile.name} already exists. It is yours - we will not "
+                  f"overwrite it. Use --force if you really mean to.")
+            return 1
+        dockerfile.write_text(scaffold.render_dockerfile(manifest))
+        print(f"wrote {dockerfile}\n\nIt belongs to this repo now. CI checks the base "
+              f"image, the version pin and the final USER; it does not check the rest.")
         return 0
 
-    target = manifest.path.parent / ".insights"
-    target.mkdir(exist_ok=True)
-    (target / "Dockerfile").write_text(dockerfile)
-    print(f"rendered -> {target / 'Dockerfile'}  (gitignored: it is derived, not source)")
+    if args.show:
+        if dockerfile.is_file():
+            print(f"# {dockerfile}  (yours - the platform does not rewrite it)\n")
+            print(dockerfile.read_text().rstrip())
+        else:
+            print("# NO Dockerfile in this repo. Below is what `insights build --write`\n"
+                  "# would generate today.\n")
+            print(scaffold.render_dockerfile(manifest).rstrip())
+        return 0
+
+    if not dockerfile.is_file():
+        print("no Dockerfile in this repo. It is yours to own now:\n\n"
+              "    insights build --write\n\n"
+              "then read it - CI checks the base image, the pin and the final USER.")
+        return 1
 
     tag = f"insights/{manifest.app}:local"
-    command = ["docker", "build", "-f", str(target / "Dockerfile"), "-t", tag, str(manifest.path.parent)]
+    command = ["docker", "build", "-f", str(dockerfile), "-t", tag, str(root)]
     print(f"$ {' '.join(command)}")
     try:
         return subprocess.run(command).returncode
     except FileNotFoundError:
-        print("\ndocker is not installed — the Dockerfile above is still valid; "
-              "`insights build --show` prints it without needing docker.")
+        print("\ndocker is not installed — `insights build --show` prints the Dockerfile "
+              "without needing it.")
         return 0
 
 
@@ -244,6 +265,29 @@ def cmd_doctor(args) -> int:
                 problems += 1
         else:
             print(_ok(f"dataset {request.dataset} ({_sensitivity(resolved)})"))
+
+    # The Dockerfile is the tenant's file now, so staleness is the one thing the
+    # platform cannot fix for them. Say it here, where it costs nothing, rather than
+    # only in CI on the day they deploy.
+    dockerfile = manifest.path.parent / "Dockerfile"
+    if not dockerfile.is_file():
+        print(_bad("no Dockerfile. It belongs to this repo - run `insights build --write`"))
+        problems += 1
+    else:
+        froms = [ln.strip() for ln in dockerfile.read_text().splitlines()
+                 if ln.strip().upper().startswith("FROM ")]
+        current = scaffold.BASE_VERSIONS.get(manifest.base)
+        expected = f"insights-hub/{manifest.base}:{current}"
+        if not froms:
+            print(_bad("Dockerfile has no FROM"))
+            problems += 1
+        elif froms[-1].split()[1] != expected:
+            print(_bad(f"Dockerfile builds on {froms[-1].split()[1]}, current is {expected}"))
+            print("        base images carry the OS and interpreter patches. Because this")
+            print("        file is yours, that fix arrives only when you bump the line.")
+            problems += 1
+        else:
+            print(_ok(f"Dockerfile on {expected} (current)"))
 
     if manifest.sdk_floor and "==" not in manifest.sdk_floor:
         print(_ok(f"sdk floor {manifest.sdk_floor} (supported: {', '.join(__import__('insights_sdk').SUPPORTED_VERSIONS)})"))
@@ -729,6 +773,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     build = sub.add_parser("build", help="show or run the container build for this app")
     build.add_argument("--show", action="store_true", help="print the Dockerfile and exit")
+    build.add_argument("--write", action="store_true",
+                       help="write the generated Dockerfile into this repo (it is yours after that)")
+    build.add_argument("--force", action="store_true", help="with --write, overwrite an existing one")
     build.set_defaults(func=cmd_build)
 
     upgrade = sub.add_parser("upgrade-scaffold", help="re-render the platform-owned files in this repo")

@@ -28,15 +28,19 @@ def test_a_generated_app_passes_the_loader(platform, tmp_path, kind):
     assert (manifest.web is not None) is (kind == "web")
 
 
-def test_a_generated_app_has_no_dockerfile(platform, tmp_path):
-    """The image is platform-owned. A file in a tenant repo is a file they can edit,
-    and an edited Dockerfile turns 'runs as non-root' from true into checked."""
-    target = tmp_path / "insights-nodocker"
-    written = scaffold.generate(target=target, name="nodocker", kind="web",
+def test_a_generated_app_ships_with_a_dockerfile(platform, tmp_path):
+    """Inverted when ADR-004 was reversed and teams took ownership of the image.
+
+    It is generated ONCE, here. If that stops, every new app fails the deploy gate on
+    its first push, which is the worst possible introduction to a platform."""
+    target = tmp_path / "insights-withdocker"
+    written = scaffold.generate(target=target, name="withdocker", kind="web",
                                 team="t", owner="MG-T")
 
-    assert not (target / "Dockerfile").exists()
-    assert "Dockerfile" not in [p.name for p in written]
+    assert (target / "Dockerfile").is_file()
+    assert "Dockerfile" in [p.name for p in written]
+    # ...and it must not be re-rendered afterwards, or we silently discard their edits.
+    assert "Dockerfile" not in [p.name for p in scaffold.PLATFORM_OWNED]
 
 
 def test_the_image_is_rendered_from_the_manifest(platform, as_app):
@@ -46,7 +50,10 @@ def test_the_image_is_rendered_from_the_manifest(platform, as_app):
     rendered = scaffold.render_dockerfile(config.manifest())
 
     assert "FROM insights-hub/python-web:0.1" in rendered   # pinned, never :latest
-    assert ":latest" not in rendered
+    # Check the FROM LINES, not the whole file: the template's own comment explains
+    # why :latest is refused, and a naive substring search matched that comment.
+    froms = [ln for ln in rendered.splitlines() if ln.startswith("FROM ")]
+    assert froms and not any(ln.split()[1].endswith(":latest") for ln in froms)
     assert "COPY static/" in rendered                        # because web.type is spa
 
 

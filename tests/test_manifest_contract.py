@@ -152,6 +152,12 @@ def test_the_sdk_floor_gate_can_actually_fail(platform, tmp_path, monkeypatch):
     def run(floor: str) -> int:
         body = {**BASE_WEB, "app": "x", "runtime": {"sdk": floor, "base": "python-web"}}
         write(tmp_path, body)
+        # The gate also checks the tenant's Dockerfile now. Without one, every case
+        # here fails - including the supported floor - and the test passes for the
+        # wrong reason while proving nothing about version ranges.
+        (tmp_path / "Dockerfile").write_text(
+            "FROM insights-hub/python-web:0.1\nCOPY src/ /app/src/\n"
+        )
         return subprocess.run(
             [sys.executable, str(gates), "--app", "x", "--manifest", str(tmp_path / "app.yaml")],
             cwd=tmp_path, capture_output=True,

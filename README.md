@@ -168,7 +168,8 @@ command that explains a rule — a rule that needs explaining is enforced in the
 | `insights new-app NAME --kind web\|job --team T --owner GROUP` | Generate a new app repo: manifest, `pyproject.toml`, source stub, four CI workflows |
 | `insights doctor` | Everything CI will check, checked locally first — **the same code path**, so they cannot disagree |
 | `insights datasets` | This app's service identity, what it declares, whether the data owner has granted it, and what else is registered (name and owner only — not a data catalog) |
-| `insights build --show` | Print the exact Dockerfile that would be built for this app |
+| `insights build --show` | Print this repo's Dockerfile, or the template if it has none |
+| `insights build --write` | Write the generated Dockerfile into this repo. It is yours from then on |
 | `insights build` | Render it to `.insights/` and run `docker build` |
 | `insights run` | Run this app locally the way the platform runs it — same identity, same environment |
 | `insights up [--port N]` | Start the whole local platform: warehouse, REST stub, every app, the edge |

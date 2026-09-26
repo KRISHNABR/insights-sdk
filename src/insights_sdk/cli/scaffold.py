@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 #: Where the reusable workflows live. Generated CI points here, so it must be real -
 #: an earlier version hard-coded an org that does not exist, and every tenant's very
@@ -70,13 +71,10 @@ environments:
 WEB_BLOCK = """
 web:
   route: /{name}
-  type: api                     # api | spa | streamlit
-                                #   api        JSON only
-                                #   spa        your own frontend in static/, served
-                                #              from the same origin. We serve it; we
-                                #              do not build it
-                                #   streamlit  one app.py; we supply the identity
-                                #              shim, health sidecar and sticky sessions
+  type: api                     # api | spa
+                                #   api  JSON only
+                                #   spa  your own frontend in static/, served from the
+                                #        same origin. We serve it; we do not build it
 """
 
 JOB_BLOCK = """
@@ -316,13 +314,28 @@ __pycache__/
 #: So it stays platform-owned, and `insights build --show` prints it. Nothing is hidden;
 #: nothing can drift.
 DOCKERFILE = """\
-# Rendered by `insights build` from app.yaml. NOT stored in the tenant repo.
+# YOUR Dockerfile. Generated once by `insights new-app`; yours to edit from here.
 #   app:  {name}
 #   base: {base}
 #
-# Everything below is a consequence of what was declared. To change it, change
-# app.yaml or pyproject.toml - and if neither can express what you need, that is a
-# platform gap and we treat it as a bug rather than a request to work around (ADR-004).
+# The platform does not rewrite this file and `insights upgrade-scaffold` does not
+# touch it - unlike .github/workflows/, which we do own. You can add build stages,
+# system packages, whatever your app needs.
+#
+# FOUR THINGS CI CHECKS, and why (ADR-004):
+#
+#   1. FROM is a published insights-hub base    we patch these; a base from Docker Hub
+#                                               is one nobody is patching for you
+#   2. no :latest                               an image you cannot name is one you
+#                                               cannot roll back to
+#   3. the final USER is not root               a container breakout should land on a
+#                                               user that owns nothing
+#   4. the base version is current              `insights doctor` warns, CI fails on
+#                                               prod deploys. THIS IS THE ONE THAT
+#                                               MATTERS: because this file is yours,
+#                                               a CVE fix in the base reaches you only
+#                                               when you bump the line below. We tell
+#                                               you loudly; we cannot do it for you.
 FROM insights-hub/{base}:{base_version}
 
 # Your dependencies, from YOUR pyproject.toml, installed from the COMMITTED lockfile.
@@ -390,7 +403,11 @@ def render_dockerfile(manifest) -> str:
 #: Files the PLATFORM owns inside a tenant repository, re-rendered by
 #: `insights upgrade-scaffold`. Everything else in a tenant repo is the tenant's.
 #: The machine-readable version of "you own your code, we own the road it travels on".
-#: Note the Dockerfile is absent — it is not in the tenant repo at all.
+#:
+#: The Dockerfile is deliberately NOT here. It is generated once and then belongs to
+#: the tenant, so re-rendering it would silently discard their edits. That is the
+#: trade we made when we let teams own their image: they get control, and in exchange
+#: the platform can only WARN that a base image has moved, never move it for them.
 PLATFORM_OWNED = (
     Path(".github/workflows/ci.yml"),
     Path(".github/workflows/deploy-dev.yml"),
@@ -415,6 +432,16 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
     base = "python-web" if kind == "web" else "python-data"
     kind_block = (WEB_BLOCK if kind == "web" else JOB_BLOCK).format(name=name)
 
+    # render_dockerfile() reads a manifest, and app.yaml does not exist yet - it is
+    # being written two lines below. A view with exactly the fields it touches is
+    # honest about the coupling and avoids a write-then-reparse dance.
+    view = SimpleNamespace(
+        app=name,
+        base=base,
+        web=SimpleNamespace(type="api") if kind == "web" else None,
+        system_packages=(),
+    )
+
     files: dict[Path, str] = {
         Path("app.yaml"): MANIFEST.format(
             name=name, team=team, kind=kind, owner=owner, base=base, kind_block=kind_block
@@ -425,6 +452,9 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
         Path("src/main.py"): (JOB_MAIN if kind == "job" else WEB_MAIN).format(name=name),
         Path("README.md"): README.format(name=name, kind=kind, team=team),
         Path(".gitignore"): GITIGNORE,
+        # Generated once, then yours. Not in PLATFORM_OWNED, so `upgrade-scaffold`
+        # will not overwrite your edits.
+        Path("Dockerfile"): render_dockerfile(view),
     }
     files.update(render_platform_owned(name))
 
