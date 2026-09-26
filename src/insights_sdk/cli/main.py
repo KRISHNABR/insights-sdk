@@ -371,6 +371,21 @@ def cmd_access(args) -> int:
     return 1
 
 
+def _seed_local_warehouse(platform: Path) -> Path:
+    """Make sure the local stub warehouse exists.
+
+    Called by BOTH `up` and `run`. It used to be called only by `up`, which meant a
+    fresh clone running `insights run` hit a missing database - found by the verify
+    workflow, not by anyone reading the code. Seeding is idempotent, so the cheapest
+    fix is also the right one: local dev should just work.
+    """
+    database = platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"
+    if not database.is_file():
+        seed = platform / "runtime" / "fakes" / "warehouse" / "seed.py"
+        subprocess.run([sys.executable, str(seed), str(database)], check=True)
+    return database
+
+
 def _port_free(port: int) -> bool:
     import socket
 
@@ -391,9 +406,8 @@ def cmd_up(args) -> int:
             return 1
     sys.path.insert(0, str(platform))
 
-    # 1. seed the stub warehouse
-    seed = platform / "runtime" / "fakes" / "warehouse" / "seed.py"
-    subprocess.run([sys.executable, str(seed)], check=True)
+    # 1. seed the stub warehouse (idempotent)
+    _seed_local_warehouse(platform)
 
     # 2. register every app in the workspace. In production this happens in CI, once per
     #    deploy; locally we discover the sibling repos so `up` is a single command.
@@ -468,6 +482,7 @@ def cmd_run(args) -> int:
     """Run the current app the way the platform runs it - same identity, same env."""
     manifest = config.manifest()
     platform = _platform()
+    _seed_local_warehouse(platform)          # a fresh clone has no database yet
     env = dict(os.environ)
     env.update(
         INSIGHTS_ENV="local",
