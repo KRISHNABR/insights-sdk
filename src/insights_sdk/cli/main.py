@@ -660,6 +660,41 @@ def cmd_up(args) -> int:
     _apps_file(local=True).write_text(json.dumps(registry, indent=2) + "\n")
     print(f"registered {len(registry)} app(s) -> {_apps_file(local=True).name}")
 
+    # Tell people about local secrets they have not set yet.
+    #
+    # The fake store is gitignored - we do not commit credentials, even obviously fake
+    # ones - so a FRESH CLONE has none, and every app declaring a `secret:` fails its
+    # first connection with no hint that the clone is the reason. Found by following
+    # the walkthrough on a clean checkout.
+    #
+    # We report, we do not create: the platform never writes a tenant's secret, and
+    # a local convenience that did would teach exactly the wrong model.
+    secret_dir = platform / "runtime" / "fakes" / "secret-store"
+    missing = []
+    for name, entry in registry.items():
+        manifest_path = Path(entry["path"]) / "app.yaml"
+        if not manifest_path.is_file():
+            continue
+        try:
+            config.reset()
+            app_manifest = config.load_manifest(manifest_path)
+        except InsightsError:
+            continue
+        for spec in app_manifest.connections:
+            if not spec.secret:
+                continue
+            target = secret_dir / name / spec.secret
+            if not target.is_file():
+                missing.append((name, spec.secret, target))
+    config.reset()
+    if missing:
+        print(f"\n  {len(missing)} local secret(s) not set — these apps will fail to connect:")
+        for name, secret, target in missing:
+            print(f"    {name}: {secret}")
+        print("  set them with (a fake value is fine locally):")
+        for _, _, target in missing:
+            print(f"    mkdir -p {target.parent} && echo local-fake > {target}")
+
     env = dict(os.environ)
     env.update(
         INSIGHTS_ENV="local",
