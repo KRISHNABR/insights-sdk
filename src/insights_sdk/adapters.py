@@ -69,11 +69,19 @@ class DatabricksEngine:
     Two things make this different from an ordinary database client, and both are
     the point of the design:
 
-    1. **No stored credential.** An interactive app exchanges the signed-in user's
-       session for a short-lived Databricks token, so Unity Catalog sees the
-       actual person and applies THEIR grants, column masks and row filters. A
-       scheduled job uses workload identity federation from its ECS task role.
-       Either way nothing is persisted and there is no secret to read.
+    1. **Short-lived tokens, obtained per query.** An interactive app exchanges the
+       signed-in user's session for a token minted FOR THAT PERSON, so Unity
+       Catalog applies their grants, column masks and row filters. A scheduled job
+       obtains one for its own service principal. Nothing is persisted either way.
+
+       How the job gets one depends on where it runs, and the difference is not
+       cosmetic - see ARCHITECTURE section 7b:
+         * on Kubernetes, the projected ServiceAccount token IS an OIDC token, so
+           Databricks workload identity federation works directly and NO secret
+           exists anywhere;
+         * on ECS Fargate the task role is IAM/SigV4, not OIDC, so it needs either
+           a per-app client secret in Secrets Manager or a token broker the task
+           calls with SigV4. A secret exists in that case, scoped to one app.
     2. **No masking here.** UC enforces column and row access itself, on every
        path to the data including notebooks. The broker deliberately does not.
 
@@ -94,7 +102,7 @@ class DatabricksEngine:
         # The bridge. A person gets a token minted for them; a job federates its
         # workload identity. Neither path reads a secret.
         token = (
-            _federate_workload_identity(host)
+            _service_token(host)
             if caller.is_service
             else _exchange_user_token(host, caller)
         )
@@ -115,14 +123,26 @@ def _exchange_user_token(host: str, caller: Any) -> str:
     raise NotImplementedError("token exchange - see ADR-002 s3")
 
 
-def _federate_workload_identity(host: str) -> str:
-    """Workload identity federation: the ECS task role -> a Databricks token.
+def _service_token(host: str) -> str:
+    """Obtain a short-lived Databricks token for this app's service principal.
 
-    No client secret exists anywhere. The task role's OIDC identity is exchanged
-    directly, which is what makes "the platform team cannot read the credential"
-    true rather than aspirational.
+    Three ways, and which one applies is a property of the RUNTIME, not of this
+    code. Stating it plainly because an earlier version of this docstring claimed
+    federation "from the ECS task role", which is not a thing: a task role is IAM,
+    not OIDC, and Databricks federation consumes an OIDC token.
+
+      1. Kubernetes    the projected ServiceAccount token is an OIDC token ->
+                       exchange it directly. No secret exists. Cleanest.
+      2. ECS Fargate   no OIDC identity. Either read a per-app client secret from
+                       Secrets Manager (task role scoped to exactly that secret),
+                       or call a platform token broker with SigV4 and let the
+                       broker federate. One secret, held once, not per app.
+      3. CI            GitHub's OIDC token federates directly, like (1).
+
+    The platform team never sees a token either way: (1) and (3) mint one on
+    demand, and in (2) the secret is readable only by the app's own task role.
     """
-    raise NotImplementedError("workload identity federation - see ADR-002 s3")
+    raise NotImplementedError("see ARCHITECTURE section 7b for the three mechanisms")
 
 
 class RestEngine:
