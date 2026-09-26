@@ -162,6 +162,38 @@ def cmd_upgrade_scaffold(args) -> int:
     return 0
 
 
+def cmd_build(args) -> int:
+    """Show, or run, the container build for this app.
+
+    The image is defined by the platform, not by the tenant - but "defined by the
+    platform" must not mean "hidden from the tenant". This prints exactly what we
+    would build, and can build it, so a team can reproduce and debug it without
+    the platform being involved.
+    """
+    manifest = config.manifest()
+    dockerfile = scaffold.render_dockerfile(manifest)
+
+    if args.show:
+        print(f"# rendered from {manifest.path.name} — not written to this repo\n")
+        print(dockerfile)
+        return 0
+
+    target = manifest.path.parent / ".insights"
+    target.mkdir(exist_ok=True)
+    (target / "Dockerfile").write_text(dockerfile)
+    print(f"rendered -> {target / 'Dockerfile'}  (gitignored: it is derived, not source)")
+
+    tag = f"insights/{manifest.app}:local"
+    command = ["docker", "build", "-f", str(target / "Dockerfile"), "-t", tag, str(manifest.path.parent)]
+    print(f"$ {' '.join(command)}")
+    try:
+        return subprocess.run(command).returncode
+    except FileNotFoundError:
+        print("\ndocker is not installed — the Dockerfile above is still valid; "
+              "`insights build --show` prints it without needing docker.")
+        return 0
+
+
 def cmd_doctor(args) -> int:
     """Everything CI will check, checked locally first. Same code path, so it cannot
     disagree with the pipeline."""
@@ -472,6 +504,10 @@ def build_parser() -> argparse.ArgumentParser:
     new.set_defaults(func=cmd_new_app)
 
     sub.add_parser("doctor", help="check this app the way CI will").set_defaults(func=cmd_doctor)
+
+    build = sub.add_parser("build", help="show or run the container build for this app")
+    build.add_argument("--show", action="store_true", help="print the Dockerfile and exit")
+    build.set_defaults(func=cmd_build)
 
     upgrade = sub.add_parser("upgrade-scaffold", help="re-render the platform-owned files in this repo")
     upgrade.add_argument("--check", action="store_true", help="report drift without writing")
