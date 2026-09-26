@@ -60,4 +60,4 @@ ADR claim into evidence:
 
 Semantic. Tenants declare a **floor** (`>=0.1,<1`), never a pin — the manifest loader
 rejects `==`. The platform supports the current major and two before it. See
-[ADR-001](https://github.com/KRISHNABR/insights-platform/blob/main/docs/adr/ADR-001-reuse-and-upgrade.md).
+[ADR-001](https://github.com/KRISHNABR/insights-platform/blob/main/docs/adr/0001-platform-shape-and-reuse-strategy.md).
