@@ -14,7 +14,7 @@ import time
 import uuid
 from typing import Any, Callable
 
-from . import config, identity, telemetry
+from . import __version__, config, connectors, identity, telemetry
 from .errors import ConfigError, InsightsError
 
 # --------------------------------------------------------------------------------
@@ -26,30 +26,33 @@ def _health(manifest: config.Manifest) -> dict[str, Any]:
     """A health check that exercises its dependencies.
 
     `{"status": "ok"}` tells you a process is running, which you already knew. This
-    resolves every dataset the app declared and confirms the credential the platform
-    was supposed to inject is actually present - so the common production failure
-    (a deploy that starts fine and fails on first use) surfaces at the health check
-    instead of at 06:00 in front of a user.
+    checks every connection the app declared: that its config resolves, and that the
+    credential the platform was supposed to inject is actually there - so the common
+    production failure (a deploy that starts fine and fails on first use) surfaces
+    here instead of at 06:00 in front of a user.
+
+    What it does NOT do is run a query. A health check that hits the warehouse every
+    thirty seconds across three hundred apps is a load generator, and it turns
+    somebody else's outage into our own red dashboard.
     """
-    checks: dict[str, str] = {}
+    checks: list[dict[str, Any]] = []
     healthy = True
-    for request in manifest.datasets:
+    for connection in manifest.connections:
+        entry: dict[str, Any] = {"connection": connection.name, "engine": connection.engine}
         try:
-            resolved = config.catalog().resolve(request.dataset)
-            settings = resolved.connection.environments[resolved.env]
-            credential_var = settings.get("dsn_env") or settings.get("base_url_env")
-            if credential_var and not os.environ.get(credential_var):
-                raise ConfigError(f"{credential_var} not injected")
-            checks[request.dataset] = "ok"
-        except Exception as exc:                        # noqa: BLE001 - report, never crash the probe
-            checks[request.dataset] = f"failed: {exc}"
+            connectors.connect(connection.name, manifest=manifest)
+            entry["status"] = "ok"
+        except InsightsError as exc:
+            entry["status"] = "failing"
+            entry["kind"] = getattr(exc, "kind", "unknown")
             healthy = False
+        checks.append(entry)
+
     return {
         "status": "ok" if healthy else "degraded",
         "app": manifest.app,
-        "team": manifest.team,
-        "sdk": config and __import__("insights_sdk").__version__,
-        "datasets": checks,
+        "sdk": __version__,
+        "connections": checks,
     }
 
 

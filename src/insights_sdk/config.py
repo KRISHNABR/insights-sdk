@@ -1,11 +1,16 @@
-"""Loading and validating the two things that configure an app.
+"""Loading and validating `app.yaml` - the one file a tenant writes to configure an app.
 
-    app.yaml        the TENANT's declaration of intent. Lives in the tenant repo.
-    catalog.yaml    the PLATFORM's registry of mechanism. Tenants cannot edit it.
-    grants.yaml     the PLATFORM's record of approvals. The second key (ADR-002 s4).
+It declares four things and nothing else:
 
-The split is the design. A tenant says *what* it needs; the platform decides *how* that
-is satisfied, and *whether* it may be.
+    who manages it        owners / contributors / readers, as corporate groups
+    what it connects to   engine, host, and the NAME of a secret. Never a value
+    how it is served      a route and a shape, or a cron schedule
+    how big it is         small | medium | large
+
+There used to be two more files here - `catalog.yaml` and `grants.yaml` - through which
+the platform brokered every read, resolving dataset nicknames and checking entitlements.
+They are gone (ADR-002). Teams already have access to their data; the platform ships the
+connector and holds the credential, and does not stand between an app and its warehouse.
 """
 
 from __future__ import annotations
@@ -28,7 +33,6 @@ _ALLOWED_TOP = {
     "apiVersion", "app", "team", "kind",
     "access",        # who manages the app, and who may use it
     "runtime",       # base image, size, sdk floor
-    "data",          # dataset names - the older brokered model, still supported
     "connections",   # engine, host and a secret NAME. Never a credential
     "web",           # kind: web  - route, type, health
     "job",           # kind: job  - schedule, timeout, retries, concurrency...
@@ -46,23 +50,10 @@ _FORBIDDEN_ANYWHERE = {
     "dsn",             # a connection string is usually a credential wearing a hat
 }
 
-#: Keys that are forbidden under `data:` but REQUIRED under `connections:`.
-#:
-#: The two blocks come from opposite models and the same word means opposite things
-#: in each. Under `data:` a team names a dataset and the platform decides how to
-#: reach it, so `engine` and `host` there are a tenant overriding the platform's
-#: mechanism. Under `connections:` the team owns the connection, so those are simply
-#: the connection - and refusing them would refuse the whole feature.
-#:
-#: Worth stating plainly because a single flat "forbidden everywhere" list is what
-#: made this wrong: it read as a security rule when it was really a coupling rule.
-_FORBIDDEN_UNDER_DATA = {
-    "connection", "engine", "secret", "table", "host", "port", "database",
-}
 
 
 def env() -> str:
-    """Which environment we are in. Drives catalog location resolution."""
+    """Which environment we are in. Connections use it to resolve ${VAR} hosts."""
     return os.environ.get("INSIGHTS_ENV", DEFAULT_ENV)
 
 
@@ -73,12 +64,6 @@ def now() -> datetime:
 # --------------------------------------------------------------------------------
 # The tenant manifest
 # --------------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class DatasetRequest:
-    dataset: str
-    access: str
-
 
 @dataclass(frozen=True)
 class Manage:
@@ -182,7 +167,6 @@ class Manifest:
     manage: Manage
     size: str
     system_packages: tuple[str, ...]
-    datasets: tuple[DatasetRequest, ...]
     connections: tuple[ConnectionSpec, ...]
     web: WebSpec | None
     job: JobSpec | None
@@ -190,25 +174,10 @@ class Manifest:
     environments: dict
     path: Path
 
-    def declares(self, dataset: str) -> bool:
-        """Step 2 of the broker. Knowing a dataset's name is not access."""
-        return any(d.dataset == dataset for d in self.datasets)
-
     @property
     def owners(self) -> tuple[str, ...]:
         return self.manage.owners
 
-    @property
-    def default_base(self) -> str:
-        """The base image a NEW app of this kind starts on.
-
-        Used only when generating a Dockerfile. After that the Dockerfile's own FROM
-        line is the source of truth and this is not consulted again - which is why
-        `runtime.base` no longer exists in the manifest. A job builds on python-data
-        because it has no web server, so a job cannot quietly become an unmonitored
-        API.
-        """
-        return "python-web" if self.kind == "web" else "python-data"
 
     @property
     def schedule(self) -> str | None:
@@ -289,7 +258,7 @@ def _parse_connection(entry: dict, target: Path) -> "ConnectionSpec":
     )
 
 
-def _scan_forbidden(node: Any, where: str = "app.yaml", *, under_data: bool = False) -> None:
+def _scan_forbidden(node: Any, where: str = "app.yaml") -> None:
     """Refuse keys a tenant must not set, at any depth.
 
     `classification` is the one that matters most: a tenant marking their own data
@@ -305,16 +274,10 @@ def _scan_forbidden(node: Any, where: str = "app.yaml", *, under_data: bool = Fa
                     f"Sensitivity is the data platform's to state, and a credential "
                     f"belongs in the secret store - app.yaml is in git."
                 )
-            if under_data and lowered in _FORBIDDEN_UNDER_DATA:
-                raise ManifestError(
-                    f"{where}: '{key}' may not appear under `data:`. That block names a "
-                    f"dataset and lets the platform resolve it. To own the connection "
-                    f"yourself, declare it under `connections:` instead."
-                )
-            _scan_forbidden(value, f"{where}:{key}", under_data=under_data or lowered == "data")
+            _scan_forbidden(value, f"{where}:{key}")
     elif isinstance(node, list):
         for item in node:
-            _scan_forbidden(item, where, under_data=under_data)
+            _scan_forbidden(item, where)
 
 
 def _find_manifest() -> Path:
@@ -333,7 +296,6 @@ def _find_manifest() -> Path:
 
 
 VALID_WEB_TYPES = ("api", "spa")
-VALID_BASES = ("python-web", "python-data", "python-min")
 
 
 def load_manifest(path: str | Path | None = None) -> Manifest:
@@ -443,10 +405,6 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
             on_failure=job_raw.get("on_failure", "notify-owners"),
         )
 
-    datasets = tuple(
-        DatasetRequest(dataset=d["dataset"], access=d.get("access", "read"))
-        for d in (raw.get("data") or [])
-    )
 
     connections = tuple(_parse_connection(entry, target) for entry in (raw.get("connections") or []))
 
@@ -457,7 +415,6 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
         manage=manage,
         size=runtime.get("size", "small"),
         system_packages=tuple(runtime.get("system_packages") or ()),
-        datasets=datasets,
         connections=connections,
         web=web,
         job=job,
@@ -468,239 +425,24 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
 
 
 # --------------------------------------------------------------------------------
-# The platform registry: connections, datasets, grants
-# --------------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Connection:
-    name: str
-    engine: str                     # "databricks" | "rest"
-    description: str
-    environments: dict
-    governance: str = "none"        # external | local-approximation | none
-
-    def governance_for(self, environment: str) -> str:
-        """Who enforces column and row access for this connection, here.
-
-        `external` means Unity Catalog does it and the broker must NOT - see
-        ADR-002 s2. `local-approximation` is the laptop stand-in so the
-        behaviour is demonstrable without a workspace.
-        """
-        return (self.environments.get(environment) or {}).get("governance", self.governance)
-
-
-@dataclass(frozen=True)
-class Dataset:
-    """A nickname, where it points, and who to ask.
-
-    Note what is absent: classification and masking rules. Those are Unity
-    Catalog tags and UC masking functions - enforced on every path to the data,
-    not just ours. This registry is a projection (ADR-002 s2).
-    """
-
-    name: str
-    description: str
-    connection: str
-    owner: str
-    locations: dict
-    local_masking: dict             # laptop-only stand-in for UC column masks
-    sensitive_fields: tuple[str, ...]   # ours: about our log pipeline, not the data platform
-
-    @property
-    def restricted(self) -> bool:
-        """True when UC tags this `sensitivity=restricted`.
-
-        Locally we infer it from the presence of masking rules, since there is no
-        UC to ask. In dev and prod the deploy pipeline reads the UC tag.
-        """
-        return bool(self.local_masking) or bool(self.sensitive_fields)
-
-
-@dataclass(frozen=True)
-class Resolved:
-    """Everything the broker needs, assembled in step 4. The only seam that would change
-    if this registry were replaced by a client against a real data catalog (ADR-002 s6)."""
-
-    dataset: Dataset
-    connection: Connection
-    location: dict                  # env-specific: {"table": ...} or {"resource": ...}
-    env: str
-
-    @property
-    def restricted(self) -> bool:
-        return self.dataset.restricted
-
-    @property
-    def physical(self) -> str:
-        """The name to substitute for the alias, in this environment.
-
-        Locally that is a table name; in dev and prod it is the Unity Catalog
-        three-level name. The tenant's SQL says the alias either way.
-        """
-        return self.location.get("uc") or self.location["table"]
-
-
-@dataclass(frozen=True)
-class Catalog:
-    connections: dict[str, Connection]
-    datasets: dict[str, Dataset]
-    path: Path
-
-    def resolve(self, alias: str, environment: str | None = None) -> Resolved:
-        environment = environment or env()
-        ds = self.datasets.get(alias)
-        if ds is None:
-            # Deliberately does NOT list what does exist. There is no discovery here
-            # (ADR-002 s5) and an error message is a poor place to start one.
-            raise UnknownDatasetError(f"'{alias}' is not a dataset on this platform.")
-        conn = self.connections.get(ds.connection)
-        if conn is None:
-            raise ConfigError(f"catalog: dataset '{alias}' names unknown connection '{ds.connection}'")
-        location = ds.locations.get(environment)
-        if not location:
-            raise ConfigError(f"catalog: dataset '{alias}' has no location for env '{environment}'")
-        return Resolved(dataset=ds, connection=conn, location=location, env=environment)
-
-
-def _registry_dir() -> Path:
-    explicit = os.environ.get("INSIGHTS_REGISTRY_DIR")
-    if explicit:
-        return Path(explicit)
-    here = Path.cwd().resolve()
-    for candidate in (here, *here.parents):
-        found = candidate / "insights-platform" / "control" / "registry"
-        if found.is_dir():
-            return found
-    raise ConfigError(
-        "Cannot locate the platform registry. In a deployed app it is mounted at "
-        "/etc/insights; locally set INSIGHTS_REGISTRY_DIR."
-    )
-
-
-def load_catalog(path: str | Path | None = None) -> Catalog:
-    target = Path(path) if path else _registry_dir() / "catalog.yaml"
-    if not target.is_file():
-        raise ConfigError(f"No catalog at {target}")
-    raw = yaml.safe_load(target.read_text()) or {}
-
-    connections = {
-        name: Connection(
-            name=name,
-            engine=body["engine"],
-            description=body.get("description", ""),
-            environments=body.get("environments", {}),
-            governance=body.get("governance", "none"),
-        )
-        for name, body in (raw.get("connections") or {}).items()
-    }
-    datasets = {
-        name: Dataset(
-            name=name,
-            description=body.get("description", ""),
-            connection=body["connection"],
-            owner=body["owner"],
-            locations=body.get("locations", {}),
-            local_masking=body.get("local_masking", {}) or {},
-            sensitive_fields=tuple(body.get("sensitive_fields", []) or []),
-        )
-        for name, body in (raw.get("datasets") or {}).items()
-    }
-    return Catalog(connections=connections, datasets=datasets, path=target)
-
-
-@dataclass(frozen=True)
-class Grants:
-    """What the DATA PLATFORM reports about access. Not an approval queue.
-
-    The platform approves nothing. A data owner grants their data to an app's
-    service identity in their own system - Unity Catalog, Snowflake roles, an API
-    key issued by whoever runs that service - and this is our read of that state,
-    used to fail early with a useful message instead of at query time in
-    production.
-
-    Locally this file stands in for that read, because there is no data platform
-    to ask. In dev and prod it is populated by querying the real one.
-    """
-    grants: tuple[dict, ...]
-    break_glass: tuple[dict, ...]
-    path: Path
-
-    @staticmethod
-    def _active(entry: dict, at: datetime) -> bool:
-        if entry.get("revoked_at"):
-            return False
-        expires = entry.get("expires_at")
-        if not expires:
-            return True                     # standing grant
-        return at < datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
-
-    def for_identity(self, dataset: str, identity: str, at: datetime | None = None) -> dict | None:
-        """Has the data owner granted this dataset to this service identity?
-
-        Keyed on the IDENTITY, not the app name, because that is what the data
-        platform actually grants to and what appears in its audit.
-        """
-        at = at or now()
-        for entry in self.grants:
-            if (entry.get("dataset") == dataset
-                    and entry.get("identity") == identity
-                    and self._active(entry, at)):
-                return entry
-        return None
-
-    def break_glass_for(self, dataset: str, operator: str, at: datetime | None = None) -> dict | None:
-        at = at or now()
-        for entry in self.break_glass:
-            if entry.get("dataset") == dataset and entry.get("operator") == operator and self._active(entry, at):
-                return entry
-        return None
-
-
-def load_grants(path: str | Path | None = None) -> Grants:
-    target = Path(path) if path else _registry_dir() / "grants.yaml"
-    if not target.is_file():
-        # An absent grants file means nothing is granted. Fail closed, do not assume.
-        return Grants(grants=(), break_glass=(), path=target)
-    raw = yaml.safe_load(target.read_text()) or {}
-    return Grants(
-        grants=tuple(raw.get("grants") or []),
-        break_glass=tuple(raw.get("break_glass") or []),
-        path=target,
-    )
-
-
-# --------------------------------------------------------------------------------
-# Process-wide cache. Loaded once at startup so a hot request path does no file I/O,
-# and so a mid-run edit to the registry cannot change enforcement under a running app.
-# --------------------------------------------------------------------------------
 
 _manifest: Manifest | None = None
-_catalog: Catalog | None = None
-_grants: Grants | None = None
 
 
 def manifest() -> Manifest:
+    """The manifest for this process, loaded once.
+
+    Cached because it is read on every request and every connection, and re-parsing
+    YAML per call is a measurable cost in a web app.
+    """
     global _manifest
     if _manifest is None:
         _manifest = load_manifest()
     return _manifest
 
 
-def catalog() -> Catalog:
-    global _catalog
-    if _catalog is None:
-        _catalog = load_catalog()
-    return _catalog
-
-
-def grants() -> Grants:
-    global _grants
-    if _grants is None:
-        _grants = load_grants()
-    return _grants
-
-
 def reset() -> None:
-    """Drop the cache. For tests and for the CLI, which may act on several apps in one process."""
-    global _manifest, _catalog, _grants
-    _manifest = _catalog = _grants = None
+    """Drop the cache. For tests, and for the CLI, which may act on several apps in
+    one process - `insights up` loads every manifest in the workspace."""
+    global _manifest
+    _manifest = None

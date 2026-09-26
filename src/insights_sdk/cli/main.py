@@ -17,8 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import __version__, config
-from ..broker import _sensitivity
+from .. import __version__, config, connectors, secrets
 from ..errors import InsightsError
 from . import scaffold
 
@@ -129,7 +128,7 @@ def cmd_new_app(args) -> int:
         "\nnext:\n"
         f"  cd {target}\n"
         "  insights doctor          # check the manifest before you push\n"
-        "  insights datasets        # what data you can ask for\n"
+        "  insights connections     # what it talks to, and whether it can\n"
     )
     return 0
 
@@ -244,75 +243,43 @@ def cmd_doctor(args) -> int:
     # freshly generated app declares neither.
     #
     # Loading it unconditionally meant `insights doctor` in a brand new app failed
-    # with "Cannot locate the platform registry" - the second command a new team
-    # runs, failing on a file that is irrelevant to them.
-    catalog = grants = None
-    if manifest.datasets:
-        try:
-            catalog = config.catalog()
-            grants = config.grants()
-        except InsightsError as exc:
-            print(_bad(f"registry: {exc}"))
-            return 1
-
     for connection in manifest.connections:
-        detail = f"{connection.engine}"
+        detail = connection.engine
         if connection.secret:
-            detail += f", secret '{connection.secret}'"
+            try:
+                secrets.resolve(manifest.app, connection.secret)
+                detail += f", secret '{connection.secret}' present"
+            except InsightsError:
+                print(_bad(f"connection {connection.name}: secret '{connection.secret}' is not set"))
+                print(f"        expected at {secrets.path_for(manifest.app, connection.secret)}")
+                print("        your team sets it. The platform cannot read or write the value.")
+                problems += 1
+                continue
         print(_ok(f"connection {connection.name} ({detail})"))
 
-    for request in manifest.datasets:
-        try:
-            resolved = catalog.resolve(request.dataset)
-        except InsightsError as exc:
-            print(_bad(f"dataset {request.dataset}: {exc}"))
-            problems += 1
-            continue
-        if resolved.restricted:
-            identity = manifest.service_identity
-            grant = grants.for_identity(request.dataset, identity)
-            if grant:
-                print(_ok(f"dataset {request.dataset} (restricted) granted to {identity} by {grant['granted_by']}"))
-            else:
-                print(_bad(f"dataset {request.dataset} is restricted and not granted to {identity}"))
-                print(f"        {resolved.dataset.owner} grants it, in the data platform.")
-                print(f"        run: insights access --dataset {request.dataset}")
-                problems += 1
-        else:
-            print(_ok(f"dataset {request.dataset} ({_sensitivity(resolved)})"))
-
-    # The Dockerfile is the tenant's file now, so staleness is the one thing the
-    # platform cannot fix for them. Say it here, where it costs nothing, rather than
-    # only in CI on the day they deploy.
-    #
-    # Note what we do NOT do: compare it to anything in app.yaml. The FROM line is
-    # the only statement of which base this app builds on. There used to be a
-    # `runtime.base` too, and a CI rule that the two must agree - a reconciliation
-    # between two sources of truth that should only ever have been one.
+    # The Dockerfile belongs to the repo. There is no platform base image to be
+    # behind any more, so the only thing worth saying here is whether it exists and
+    # whether it would pass the two CI rules - pinned base, non-root final user.
     dockerfile = manifest.path.parent / "Dockerfile"
     if not dockerfile.is_file():
         print(_bad("no Dockerfile. It belongs to this repo - run `insights build --write`"))
         problems += 1
     else:
-        froms = [ln.strip() for ln in dockerfile.read_text().splitlines()
-                 if ln.strip().upper().startswith("FROM ")]
+        lines = [ln.strip() for ln in dockerfile.read_text().splitlines()]
+        froms = [ln.split()[1] for ln in lines if ln.upper().startswith("FROM ")]
+        users = [ln.split()[1] for ln in lines if ln.upper().startswith("USER ")]
+        unpinned = [i for i in froms if "${" not in i and (i.endswith(":latest") or ":" not in i)]
         if not froms:
             print(_bad("Dockerfile has no FROM"))
             problems += 1
+        elif unpinned:
+            print(_bad(f"Dockerfile base is not pinned: {unpinned[0]}"))
+            problems += 1
+        elif not users or users[-1] in ("root", "0"):
+            print(_bad("Dockerfile would run as root - set a non-root USER last"))
+            problems += 1
         else:
-            image = froms[-1].split()[1]
-            base, _, pinned = image.partition("insights-hub/")[2].partition(":")
-            current = scaffold.BASE_VERSIONS.get(base)
-            if current is None:
-                print(_bad(f"Dockerfile builds on {image} - not a published base"))
-                problems += 1
-            elif pinned != current:
-                print(_bad(f"Dockerfile pins {base}:{pinned}, current is {current}"))
-                print("        base images carry the OS and interpreter patches. Because this")
-                print("        file is yours, that fix arrives only when you bump the line.")
-                problems += 1
-            else:
-                print(_ok(f"Dockerfile on {base}:{pinned} (current)"))
+            print(_ok(f"Dockerfile on {froms[-1]}, runs as {users[-1]}"))
 
     # The SDK version is pyproject.toml's to state and uv.lock's to pin, and uv
     # enforces it on every build. Reporting it here is informational only - there is
@@ -323,54 +290,58 @@ def cmd_doctor(args) -> int:
     return 1 if problems else 0
 
 
-def cmd_datasets(args) -> int:
-    """What this app declares, and whether its identity can actually read it.
+def cmd_connections(args) -> int:
+    """What this app connects to, and whether it actually can.
 
-    Deliberately NOT a data catalog. It shows three things:
+    Replaces `insights datasets`, which listed dataset nicknames the platform would
+    resolve. The platform does not resolve anything now: a team declares a connection
+    and we open it, so the useful question is "will this work", answered by trying.
 
-      * the service identity this app's unattended work runs as - derived from the
-        registered app name, so a team cannot claim another app's identity;
-      * for each dataset the app declares, whether the DATA OWNER has granted it to
-        that identity (read from the data platform; locally, from the fixture);
-      * for anything else in the registry, only a name and an owner - enough to know
-        who to ask, and nothing that describes data you cannot read (ADR-002 s5).
-
-    It does not enumerate everything you personally have access to. That is the data
-    platform's job and it already does it better.
+    `--probe` opens each connection for real. Off by default, because a command that
+    silently touches production systems is a surprise nobody wants.
     """
     manifest = config.manifest()
-    catalog = config.catalog()
-    grants = config.grants()
-    identity = manifest.service_identity
+    if not manifest.connections:
+        print(f"{manifest.app} declares no connections.\n\n"
+              "Add one under `connections:` in app.yaml - engine, host, and the NAME\n"
+              "of a secret. The value goes in the secret store; never in the manifest.")
+        return 0
 
-    print(f"{manifest.app}\n")
-    print(f"  unattended work runs as   {identity}")
+    print(f"{manifest.app}")
+    print(f"  unattended work runs as   {manifest.service_identity}")
     print(f"  interactive requests run as the signed-in user\n")
 
-    print("  DECLARED")
-    missing = []
-    for request in manifest.datasets:
-        resolved = catalog.resolve(request.dataset)
-        if not resolved.restricted:
-            state = "ok"
-        elif grants.for_identity(request.dataset, identity):
-            state = "granted"
+    problems = 0
+    for spec in manifest.connections:
+        print(f"  {spec.name}")
+        print(f"    engine    {spec.engine}")
+        for key, value in sorted(spec.options.items()):
+            print(f"    {key:<9} {value}")
+        if spec.secret:
+            path = secrets.path_for(manifest.app, spec.secret)
+            try:
+                secrets.resolve(manifest.app, spec.secret)
+                print(f"    secret    {spec.secret}  ->  {path}  [present]")
+            except InsightsError:
+                print(f"    secret    {spec.secret}  ->  {path}  [MISSING]")
+                print(f"              your team sets this. The platform cannot read it.")
+                problems += 1
         else:
-            state = "NOT GRANTED"
-            missing.append((request.dataset, resolved.dataset.owner))
-        print(f"    {request.dataset:<22} {_sensitivity(resolved):<12} {resolved.dataset.owner:<24} {state}")
+            print(f"    secret    none")
 
-    for dataset, owner in missing:
-        print(f"\n    {dataset} is not granted to {identity}.")
-        print(f"    The platform cannot grant it. Ask {owner} to grant read access to")
-        print(f"    {identity} in the data platform, then re-run `insights doctor`.")
+        if args.probe:
+            try:
+                connectors.connect(spec.name, manifest=manifest)
+                print(f"    probe     connected")
+            except InsightsError as exc:
+                print(f"    probe     FAILED ({getattr(exc, 'kind', 'unknown')})")
+                print(f"              {str(exc).splitlines()[0]}")
+                problems += 1
+        print()
 
-    others = [n for n in sorted(catalog.datasets) if not manifest.declares(n)]
-    if others:
-        print("\n  ALSO REGISTERED  (name and owner only - ask the owner what is in it)")
-        for name in others:
-            print(f"    {name:<22} {'restricted' if catalog.datasets[name].restricted else 'standard':<12} {catalog.datasets[name].owner}")
-    return 0
+    if problems:
+        print(f"{problems} problem(s). `insights connections --probe` opens each one for real.")
+    return 1 if problems else 0
 
 
 def cmd_status(args) -> int:
@@ -388,113 +359,71 @@ def cmd_status(args) -> int:
     print(f"{'APP':<24}{'TEAM':<20}{'KIND':<6}{'SDK':<8}{'LAST SEEN':<22}STATUS")
     for name, entry in sorted(registry.items()):
         seen = last_seen.get(name, "-")
-        flag = "restricted" if entry.get("restricted") else ""
+        flag = ", ".join(entry.get("connections") or ())
         state = "ok" if seen != "-" else "no telemetry"
         print(f"{name:<24}{entry['team']:<20}{entry['kind']:<6}{entry.get('sdk','-'):<8}{seen:<22}{state}  {flag}")
     return 0
 
 
 def cmd_compliance_report(args) -> int:
-    """The artefact you hand a compliance reviewer. Everything in it is read from the
-    registry and the audit sink - nothing is asserted by this command itself."""
-    catalog = config.catalog()
-    grants = config.grants()
-    dataset_name = args.dataset
-    dataset = catalog.datasets.get(dataset_name)
-    if dataset is None:
-        print(f"no dataset '{dataset_name}'")
-        return 1
+    """The artefact you hand a compliance reviewer.
 
-    print(f"DATASET  {dataset_name}      sensitivity: {'restricted' if dataset.restricted else 'standard'}     owner: {dataset.owner}\n")
+    Everything in it is read from the registry, the manifests and the audit sink -
+    nothing is asserted by this command. That is the point: a report the platform
+    team writes by hand is a claim, and a reviewer is right not to accept it.
 
-    # Reported by IDENTITY, because that is what the data platform granted to and
-    # what its audit shows. Reporting the app name here would be our own relabelling
-    # of someone else's record - and the point of this artefact is that it is not.
-    print("IDENTITIES WITH ACCESS")
-    granted = [g for g in grants.grants if g["dataset"] == dataset_name]
-    if not granted:
-        print("  (none)")
-    for grant in granted:
-        roles = ",".join(grant.get("roles") or ()) or "-"
-        print(f"  {grant['identity']:<28} granted {grant['granted_at'][:10]} "
-              f"by {grant['granted_by']}   roles: {roles}")
+    What it can show has changed with the platform. It used to list who was granted
+    which dataset, because the platform brokered every read. It does not broker reads
+    now, so it reports what it actually knows: which apps hold which connections,
+    whose credential each one uses, and every connection failure by kind.
 
-    reads = [r for r in _read_sink("audit") if r.get("dataset") == dataset_name]
-    print(f"\nACCESS IN PERIOD{'':38}{len(reads)} reads")
-    for record in reads[-10:]:
-        print(f"  {record['ts']}  {record.get('app','?'):<22} {record.get('caller','?'):<24} {record.get('rows',0)} rows")
+    What it deliberately cannot show is a row of anybody's data. There is none in the
+    sink to show.
+    """
+    registry = _registered()
+    events = _read_sink("events")
 
-    standing = [g for g in granted if g.get("operator")]
-    print(f"\nOPERATOR ACCESS{'':39}{len(standing)} standing · {len(grants.break_glass)} break-glass")
-    now = datetime.now(timezone.utc)
-    for entry in grants.break_glass:
-        if entry["dataset"] != dataset_name:
+    apps = sorted(k for k in registry if not k.startswith("_"))
+    if args.app:
+        apps = [a for a in apps if a == args.app]
+
+    print("CONNECTIONS AND CREDENTIALS\n")
+    print(f"  {'APP':<24} {'CONNECTION':<20} {'ENGINE':<16} SECRET")
+    for name in apps:
+        path = Path(registry[name].get("path", "")) / "app.yaml"
+        if not path.is_file():
             continue
-        expired = "expired" if not grants._active(entry, now) else "ACTIVE"
-        print(f"  {entry['requested_at'][:10]}  {entry['operator']}  approved by {entry['approved_by']}  [{expired}]")
-        print(f"              used {entry.get('used', 0)}x · tenant notified: {entry.get('tenant_notified')}")
+        try:
+            manifest = config.load_manifest(path)
+        except InsightsError:
+            continue
+        for spec in manifest.connections:
+            secret = secrets.path_for(name, spec.secret) if spec.secret else "-"
+            print(f"  {name:<24} {spec.name:<20} {spec.engine:<16} {secret}")
 
-    violations = [r for r in _read_sink("events") if r.get("event") == "redaction_violation"]
-    print(f"\nREDACTION ASSERTIONS{'':34}active, {len(violations)} violations")
+    print("\nWHO CAN READ EACH SECRET")
+    print("  the app's own identity (sp-<app>), on its own prefix, and the owning group.")
+    print("  NOT the platform team: an explicit IAM Deny on insights/* that no Allow")
+    print("  overrides. Every read is in CloudTrail, including ours.")
+
+    failures = [r for r in events if r.get("event") == "connection_failed"]
+    print(f"\nCONNECTION FAILURES IN PERIOD{'':22}{len(failures)}")
+    kinds: dict[str, int] = {}
+    for record in failures:
+        kinds[record.get("kind", "unknown")] = kinds.get(record.get("kind", "unknown"), 0) + 1
+    for kind, count in sorted(kinds.items(), key=lambda kv: -kv[1]):
+        owner = "platform" if kind in ("tls", "network") else "tenant"
+        print(f"  {kind:<18} {count:>4}   likely {owner}")
+
+    queries = [r for r in events if r.get("event") == "query_executed"]
+    print(f"\nQUERIES IN PERIOD{'':33}{len(queries)}")
+    print("  Recorded per query: connection, engine, duration, row count.")
+    print("  NOT recorded, by construction: the SQL, or any row it returned.")
+
+    violations = [r for r in events if r.get("event") == "redaction_violation"]
+    print(f"\nREDACTION ASSERTIONS{'':30}active, {len(violations)} violations")
     print(f"\nevidence read from {_registry()} and {_sink_dir()}")
     return 0
-
-
-def cmd_access(args) -> int:
-    """Print the access request to send, and to whom.
-
-    There is deliberately no `approve`. The platform does not own the data and
-    cannot grant access to it - a command that looked like it could would be
-    misleading about where authority actually lives.
-    """
-    manifest = config.manifest()
-    catalog = config.catalog()
-    grants = config.grants()
-    identity = manifest.service_identity
-
-    wanted = [args.dataset] if args.dataset else [d.dataset for d in manifest.datasets]
-    for name in wanted:
-        dataset = catalog.datasets.get(name)
-        if dataset is None:
-            print(f"no dataset '{name}' in the registry")
-            return 1
-        granted = grants.for_identity(name, identity)
-        print(f"\n  {name}   owner: {dataset.owner}   {'GRANTED' if granted else 'not granted'}")
-        if granted:
-            continue
-        print(f"""
-    Send to {dataset.owner}:
-
-      Please grant read access on {name}
-      to the service identity  {identity}
-      for the app              {manifest.app} ({manifest.team})
-      reason                   {args.reason}
-
-    They grant it in the data platform, not here. `insights doctor` will go green
-    once it exists.""")
-    return 0
-
-
-def _seed_local_warehouse(platform: Path) -> Path:
-    """Make sure the local stub warehouse exists.
-
-    Called by BOTH `up` and `run`. It used to be called only by `up`, which meant a
-    fresh clone running `insights run` hit a missing database - found by the verify
-    workflow, not by anyone reading the code. Seeding is idempotent, so the cheapest
-    fix is also the right one: local dev should just work.
-    """
-    database = platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"
-    if not database.is_file():
-        seed = platform / "runtime" / "fakes" / "warehouse" / "seed.py"
-        subprocess.run([sys.executable, str(seed), str(database)], check=True)
-    return database
-
-
-def _port_free(port: int) -> bool:
-    import socket
-
-    with socket.socket() as probe:
-        return probe.connect_ex(("127.0.0.1", port)) != 0
 
 
 def cmd_logs(args) -> int:
@@ -589,6 +518,28 @@ def cmd_logs(args) -> int:
     return 0
 
 
+def _seed_local_warehouse(platform: Path) -> Path:
+    """Make sure the local stub warehouse exists.
+
+    A team's own warehouse, standing in for whatever they really connect to. Called by
+    both `up` and `run` - it used to be called only by `up`, so a fresh clone running
+    `insights run` hit a missing database. Seeding is idempotent, so the cheapest fix
+    is also the right one: local dev should just work.
+    """
+    database = platform / "runtime" / "fakes" / "warehouse" / "warehouse.db"
+    if not database.is_file():
+        seed = platform / "runtime" / "fakes" / "warehouse" / "seed.py"
+        subprocess.run([sys.executable, str(seed), str(database)], check=True)
+    return database
+
+
+def _port_free(port: int) -> bool:
+    import socket
+
+    with socket.socket() as probe:
+        return probe.connect_ex(("127.0.0.1", port)) != 0
+
+
 def cmd_up(args) -> int:
     """Start the whole local platform: warehouse, directory stub, every web app, the edge."""
     workspace, platform = _workspace(), _platform()
@@ -611,15 +562,6 @@ def cmd_up(args) -> int:
     for manifest_path in sorted(workspace.glob("insights-*/app.yaml")):
         config.reset()
         manifest = config.load_manifest(manifest_path)
-        restricted = any(
-            config.load_catalog(_registry() / "catalog.yaml").datasets[d.dataset].restricted
-            for d in manifest.datasets
-        )
-        # Every group that may reach this app at all: the people who manage it, plus
-        # the groups behind each declared role. The EDGE enforces this - see ADR-002
-        # layer 1 - so it has to be reconciled into the registry here rather than the
-        # edge re-reading every tenant's manifest. In production the deploy pipeline
-        # does exactly this step.
         # Every group that may reach this app at all. Since `access.roles` was
         # removed, that is exactly the union of the three management tiers - which
         # `manage.everyone` already computes, so the edge's table and `require_role`
@@ -628,7 +570,7 @@ def cmd_up(args) -> int:
         registry[manifest.app] = {
             "team": manifest.team, "kind": manifest.kind, "sdk": __version__,
             "path": str(manifest_path.parent), "schedule": manifest.schedule,
-            "restricted": restricted, "groups": groups,
+            "connections": [c.name for c in manifest.connections], "groups": groups,
             "port": port if manifest.kind == "web" else None,
         }
         if manifest.kind == "web":
@@ -748,7 +690,7 @@ def cmd_up(args) -> int:
         f"  a session cookie. Without it every route returns 401, which is the point.\n"
         f"\nlogs     insights logs --app headcount-dashboard --startup   (why it did or did not boot)\n"
         f"         insights logs --app headcount-dashboard             (what it did once running)\n"
-        f"         insights logs --stream audit                        (every restricted-data read)\n"
+        f"         insights logs --event query_executed                 (every query, by connection)\n"
         f"\nctrl-c to stop"
     )
     # Tear the stack down on ANY exit, not just ctrl-c.
@@ -839,14 +781,18 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade = sub.add_parser("upgrade-scaffold", help="re-render the platform-owned files in this repo")
     upgrade.add_argument("--check", action="store_true", help="report drift without writing")
     upgrade.set_defaults(func=cmd_upgrade_scaffold)
-    sub.add_parser("datasets", help="what this app can read, and what it could ask for").set_defaults(func=cmd_datasets)
     sub.add_parser("status", help="every registered app").set_defaults(func=cmd_status)
+    connections = sub.add_parser("connections", help="what this app connects to, and whether it can")
+    connections.add_argument("--probe", action="store_true",
+                             help="actually open each connection (touches real systems)")
+    connections.set_defaults(func=cmd_connections)
+
     logs = sub.add_parser("logs", help="process logs and telemetry for a local app")
     logs.add_argument("--app", help="only this app")
     logs.add_argument("--startup", action="store_true",
                       help="the process log (uvicorn, import errors) instead of telemetry")
     logs.add_argument("--stream", default="all", choices=("all", "events", "audit"))
-    logs.add_argument("--event", help="only this event name, e.g. dataset_read")
+    logs.add_argument("--event", help="only this event name, e.g. query_executed")
     logs.add_argument("-n", "--lines", type=int, default=40)
     logs.add_argument("--json", action="store_true", help="raw records, for piping to jq")
     logs.set_defaults(func=cmd_logs)
@@ -858,13 +804,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("run", help="run this app locally, as the platform would").set_defaults(func=cmd_run)
 
     report = sub.add_parser("compliance-report", help="evidence for a reviewer")
-    report.add_argument("--dataset", required=True)
+    report.add_argument("--app", help="limit to one app")
     report.set_defaults(func=cmd_compliance_report)
 
-    access = sub.add_parser("access", help="show what to ask a data owner for, and who to ask")
-    access.add_argument("--dataset", help="default: everything this app declares")
-    access.add_argument("--reason", default="(state your reason here)")
-    access.set_defaults(func=cmd_access)
 
     return parser
 

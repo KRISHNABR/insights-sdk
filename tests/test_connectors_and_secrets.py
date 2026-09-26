@@ -14,6 +14,8 @@ from insights_sdk import config, connect, secrets
 from insights_sdk.connectors import ConnectionFailed, _translate
 from insights_sdk.errors import ManifestError
 
+from conftest import signed_in
+
 
 @pytest.fixture
 def app(tmp_path, monkeypatch):
@@ -51,12 +53,22 @@ job:
 
 
 def test_a_team_reads_their_own_data_through_a_declared_connection(app):
-    rows = connect("team-warehouse").query("SELECT name, amount FROM salaries")
+    with signed_in("sp-demo"):
+        rows = connect("team-warehouse").query("SELECT name, amount FROM salaries")
     assert rows == [{"name": "vidya", "amount": 112000}]
 
 
+def test_no_connection_without_a_caller_the_platform_vouched_for(app):
+    """The credential belongs to the APP, not to whoever is asking. Outside the edge
+    there is no caller, so there is no connection either."""
+    from insights_sdk.errors import IdentityError
+
+    with pytest.raises(IdentityError):
+        connect("team-warehouse")
+
+
 def test_a_connection_that_was_not_declared_is_refused(app):
-    with pytest.raises(ConnectionFailed) as exc:
+    with signed_in("sp-demo"), pytest.raises(ConnectionFailed) as exc:
         connect("someone-elses-warehouse")
     assert exc.value.kind == "not_declared"
     assert "team-warehouse" in str(exc.value), "the error should list what IS declared"

@@ -15,32 +15,42 @@ from types import SimpleNamespace
 from insights_sdk.cli import scaffold
 
 
-def _view(base="python-data", web=None, system=()):
-    """`default_base`, not `base`: the manifest no longer carries one. It is derived
-    from `kind` when a Dockerfile is GENERATED, and after that the FROM line owns it."""
-    return SimpleNamespace(app="demo", default_base=base, web=web, system_packages=system)
+def _view(web=None, system=()):
+    """The manifest carries no base image. The platform publishes none - a team owns
+    their Dockerfile outright, including the Python version."""
+    return SimpleNamespace(app="demo", kind="web" if web else "job",
+                           web=web, system_packages=system)
 
 
-def test_the_generated_dockerfile_pins_a_published_base():
+def test_the_generated_dockerfile_pins_its_base():
+    """A standard Python image, pinned. Not :latest - an image you cannot name is one
+    you cannot roll back to, and it is one of only two rules CI enforces here."""
     text = scaffold.render_dockerfile(_view())
     froms = [ln for ln in text.splitlines() if ln.startswith("FROM ")]
     assert froms, "no FROM line"
-    image = froms[-1].split()[1]
-    assert image.startswith("insights-hub/"), image
-    assert not image.endswith(":latest"), "a base you cannot name is one you cannot roll back to"
-    assert image.split(":", 1)[1] == scaffold.BASE_VERSIONS["python-data"]
+    image = froms[0].split()[1]
+    assert image.startswith("python:"), image
+    assert not image.endswith(":latest")
+
+
+def test_a_team_can_change_the_python_version_by_editing_one_line():
+    """The answer to "we need 3.10 and you support 3.12": edit the FROM line. Nothing
+    in the platform pins a tenant's interpreter, and nothing checks it."""
+    text = scaffold.render_dockerfile(_view())
+    assert text.count("FROM python:") == 1
 
 
 def test_the_generated_dockerfile_never_ends_as_root():
-    """The base image sets USER insights, so the tenant file correctly has no USER
-    line at all. What must not happen is it ending on root."""
+    """There is no base image setting this for us any more, so the generated file must
+    set it itself - and CI fails a Dockerfile that has no USER at all."""
     text = scaffold.render_dockerfile(_view())
     users = [ln for ln in text.splitlines() if ln.strip().upper().startswith("USER ")]
-    assert not users or users[-1].split()[1] not in ("root", "0")
+    assert users, "no USER line: this container would run as root"
+    assert users[-1].split()[1] not in ("root", "0")
 
 
 def test_an_spa_copies_its_own_bundle_and_a_job_does_not():
-    spa = scaffold.render_dockerfile(_view(base="python-web", web=SimpleNamespace(type="spa")))
+    spa = scaffold.render_dockerfile(_view(web=SimpleNamespace(type="spa")))
     job = scaffold.render_dockerfile(_view())
     assert "COPY static/" in spa
     assert "COPY static/" not in job, "a job has no frontend to serve"
@@ -53,7 +63,7 @@ def test_declared_system_packages_install_as_root_then_drop_back():
     assert "libgeos-dev" in text
     users = [ln.strip() for ln in text.splitlines() if ln.strip().upper().startswith("USER ")]
     assert users[0].split()[1] == "root"
-    assert users[-1].split()[1] == "insights", "installed as root and never dropped back"
+    assert users[-1].split()[1] == "app", "installed as root and never dropped back"
 
 
 def test_a_generated_app_contains_a_dockerfile(tmp_path):

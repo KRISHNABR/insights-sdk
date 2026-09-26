@@ -32,25 +32,10 @@ _SCALARS = (str, int, float, bool, type(None))
 #: A string this long is a payload wearing a coat.
 _MAX_STRING = 512
 
-#: dataset -> field names that must never appear in telemetry. Populated by the data
-#: broker when it resolves a restricted dataset, from the platform catalog - never from
-#: tenant code, which is the point: the tenant cannot shorten this list.
-_sensitive: dict[str, tuple[str, ...]] = {}
-
 #: Test/CLI hook. When a list is installed here, every record is also appended to it.
 _capture: list[dict] | None = None
 
 
-def register_sensitive_fields(dataset: str, fields: tuple[str, ...]) -> None:
-    _sensitive[dataset] = tuple(f.lower() for f in fields)
-
-
-def clear_sensitive_fields() -> None:
-    _sensitive.clear()
-
-
-def _all_sensitive() -> set[str]:
-    return {f for fields in _sensitive.values() for f in fields}
 
 
 def _reject_payloads(fields: dict[str, Any]) -> None:
@@ -60,34 +45,13 @@ def _reject_payloads(fields: dict[str, Any]) -> None:
             raise RedactionError(
                 f"telemetry field {key!r} is a {type(value).__name__}, and log records may only "
                 f"carry scalars. If you want to record a result set, record its shape: "
-                f"log.info('read', dataset=..., rows=len(rows))."
+                f"log.info('read', connection=..., rows=len(rows))."
             )
         if isinstance(value, str) and len(value) > _MAX_STRING:
             raise RedactionError(
                 f"telemetry field {key!r} is {len(value)} characters. Anything this large is a "
                 f"payload in string form; log an identifier or a length instead."
             )
-
-
-def _reject_sensitive_names(event: str, fields: dict[str, Any]) -> None:
-    """Additionally, for apps touching restricted data: no field NAME from that dataset
-    may appear - as a key, in the event name, or inside any string value."""
-    sensitive = _all_sensitive()
-    if not sensitive:
-        return
-    haystacks = [event.lower()]
-    for key, value in fields.items():
-        haystacks.append(str(key).lower())
-        if isinstance(value, str):
-            haystacks.append(value.lower())
-    for name in sensitive:
-        for hay in haystacks:
-            if name in hay:
-                raise RedactionError(
-                    f"telemetry mentions {name!r}, a field of a restricted dataset this app reads. "
-                    f"Restricted field names do not go in logs, even empty ones - a field name in a "
-                    f"log line tells a reader what the data contains."
-                )
 
 
 def _base_record(stream: str, level: str, event: str) -> dict[str, Any]:
@@ -136,7 +100,6 @@ class Logger:
 
     def _emit(self, level: str, event: str, **fields: Any) -> dict[str, Any]:
         _reject_payloads(fields)
-        _reject_sensitive_names(event, fields)
         record = _base_record("events", level, event)
         record.update(fields)
         _write(record)

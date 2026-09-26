@@ -23,8 +23,8 @@ def test_the_scaffold_module_imports():
 def test_every_public_module_imports():
     """A rename that misses one relative import should fail here, not in production."""
     for name in (
-        "adapters", "broker", "config", "deprecation", "entrypoints",
-        "errors", "identity", "outputs", "telemetry",
+        "config", "connectors", "deprecation", "entrypoints",
+        "errors", "identity", "outputs", "secrets", "telemetry",
     ):
         importlib.import_module(f"insights_sdk.{name}")
 
@@ -37,14 +37,13 @@ def test_every_command_is_registered_and_has_a_handler():
     commands = set(subparsers[0].choices)
 
     expected = {
-        "new-app", "doctor", "datasets", "status", "up", "run", "logs",
-        "build", "compliance-report", "access", "upgrade-scaffold",
+        "new-app", "doctor", "connections", "status", "up", "run", "logs",
+        "build", "compliance-report", "upgrade-scaffold",
     }
     assert expected <= commands, f"missing commands: {expected - commands}"
 
     for name, sub in subparsers[0].choices.items():
-        # `access` dispatches to subcommands; everything else needs its own handler
-        assert sub.get_default("func") is not None or name == "access", f"{name} has no handler"
+        assert sub.get_default("func") is not None, f"{name} has no handler"
 
 
 @pytest.mark.parametrize("args", [["--version"], ["--help"]])
@@ -56,7 +55,7 @@ def test_the_cli_runs_without_a_project(args, capsys):
     assert exit_info.value.code == 0
 
 
-def test_no_command_calls_a_name_that_does_not_exist():
+def test_no_function_calls_a_name_that_does_not_exist():
     """Catch "the helper was deleted but something still calls it" without running it.
 
     This is the second time that shape has got through: first a module rename left a
@@ -68,17 +67,30 @@ def test_no_command_calls_a_name_that_does_not_exist():
     So check it statically instead. Walk every function in the CLI and assert each
     global name it loads is defined somewhere: module scope, an import, or a builtin.
     """
+    import importlib
+
+    # EVERY module, not just the CLI. It was cli/main.py only, and a rewrite then left
+    # `__version__` unimported in entrypoints.py - a NameError that surfaced as an app
+    # failing its health check, three layers from the cause.
+    modules = [
+        importlib.import_module(f"insights_sdk.{name}")
+        for name in ("config", "connectors", "entrypoints", "identity", "outputs",
+                     "secrets", "telemetry", "deprecation", "cli.main", "cli.scaffold")
+    ]
+    missing = []
+    for module in modules:
+        _check_module(module, missing)
+    assert not missing, "\n".join(sorted(set(missing)))
+
+
+def _check_module(module, missing: list) -> None:
     import ast
     import builtins
     import inspect
 
-    from insights_sdk.cli import main as cli
-
-    source = inspect.getsource(cli)
+    source = inspect.getsource(module)
     tree = ast.parse(source)
-
-    defined = set(dir(builtins)) | set(vars(cli))
-    missing = []
+    defined = set(dir(builtins)) | set(vars(module))
 
     # Only analyse TOP-LEVEL functions. A nested def is covered by walking its
     # parent, which is what makes closure variables resolve - checking it separately

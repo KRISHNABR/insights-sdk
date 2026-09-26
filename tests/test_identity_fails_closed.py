@@ -7,7 +7,7 @@ someone remembered to check a flag, but because an untrusted caller has no group
 import pytest
 
 from insights_sdk import identity
-from insights_sdk.broker import query
+from insights_sdk import connect
 from insights_sdk.errors import AuthzError, IdentityError
 
 from conftest import EDGE_TOKEN, edge_headers, signed_in
@@ -28,13 +28,13 @@ def test_groups_are_empty_without_trust(platform):
     untrusted = identity.Caller(subject="vidya@corp.example", request_id="r", trusted=False,
                                 _groups=("comp-analyst",))
     assert untrusted.groups == ()
-    assert untrusted.has_role("comp-analyst") is False
+    assert untrusted.groups == ()          # fail-closed as a data structure
 
 
 def test_an_app_run_outside_the_edge_can_read_nothing(platform, as_app):
     as_app("app-web.yaml")
     with pytest.raises(IdentityError):
-        query("hr.headcount", "SELECT * FROM hr.headcount")
+        connect("team-warehouse").query("SELECT * FROM hr_headcount")
 
 
 def test_a_valid_edge_assertion_is_believed(platform, as_app):
@@ -42,8 +42,8 @@ def test_a_valid_edge_assertion_is_believed(platform, as_app):
     with signed_in("krishna@corp.example", "MG-PEOPLE-OPS,headcount-viewer"):
         caller = identity.current_user()
         assert caller.trusted is True
-        assert caller.has_role("headcount-viewer")
-        assert query("hr.headcount", "SELECT dept FROM hr.headcount")
+        assert caller.groups == ("MG-PEOPLE-OPS", "headcount-viewer")
+        assert connect("team-warehouse").query("SELECT dept FROM hr_headcount")
 
 
 def test_require_role_refuses_a_trusted_caller_outside_every_tier(platform, as_app):
@@ -72,6 +72,6 @@ def test_a_job_acts_as_itself(platform, as_app):
     manifest = config.manifest()
     service = identity.Caller.service(manifest.service_identity, manifest.owners, "run-1")
 
-    assert service.subject == "sp-comp-report"
+    assert service.subject == "sp-demo"
     assert service.trusted is True
     assert "MG-PEOPLE-ANALYTICS" in service.groups

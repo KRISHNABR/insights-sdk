@@ -148,11 +148,23 @@ def test_runtime_sdk_and_base_are_refused(platform, tmp_path, removed):
 
 # --- declare, don't wire ------------------------------------------------------
 
-def test_mechanism_words_are_refused_at_any_depth(platform, tmp_path):
-    """A tenant declares intent. Naming a table, an engine or a classification is
-    naming mechanism, and the loader refuses the file rather than ignoring the key."""
-    for key in ("classification", "connection", "engine", "credential", "dsn", "table"):
-        body = {**BASE_WEB, "data": [{"dataset": "hr.headcount", "access": "read", key: "x"}]}
+def test_a_tenant_cannot_state_a_classification_at_any_depth(platform, tmp_path):
+    """Sensitivity is the data platform's to state, not a tenant's. Nested three
+    levels deep must not get it past, which is why the scanner recurses."""
+    for body in (
+        {**BASE_WEB, "web": {"route": "/x", "type": "spa", "classification": "internal"}},
+        {**BASE_WEB, "environments": {"prod": {"meta": {"classification": "public"}}}},
+    ):
+        with pytest.raises(ManifestError, match="classification"):
+            config.load_manifest(write(tmp_path, body))
+
+
+def test_a_credential_cannot_be_written_into_a_connection(platform, tmp_path):
+    """app.yaml is in git, so a credential here is a credential in the history
+    forever. The loader refuses the file rather than accepting the commit."""
+    for key in ("password", "token", "api_key", "client_secret", "dsn"):
+        body = {**BASE_WEB, "connections": [
+            {"name": "w", "engine": "postgres", "host": "db.internal", key: "hunter2"}]}
         with pytest.raises(ManifestError, match=key):
             config.load_manifest(write(tmp_path, body))
 
@@ -180,7 +192,7 @@ def test_the_sdk_floor_gate_can_actually_fail(platform, tmp_path, monkeypatch):
 
     write(tmp_path, {**BASE_WEB, "app": "x"})
     (tmp_path / "Dockerfile").write_text(
-        "FROM insights-hub/python-web:0.1\nCOPY src/ /app/src/\n"
+        "FROM python:3.12-slim\nRUN useradd -u 10001 app\nCOPY src/ /app/src/\nUSER app\n"
     )
 
     def run(floor: str) -> int:

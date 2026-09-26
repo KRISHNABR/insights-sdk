@@ -1,16 +1,17 @@
 apiVersion: v1
-app: headcount-dashboard
+app: demo
 team: people-ops
 kind: web
 access:
   manage:
-    owners: [MG-PEOPLE-OPS]
+    owners:       [MG-PEOPLE-OPS]
     contributors: [MG-PEOPLE-OPS-ENG]
+    readers:      [MG-FINANCE-BI]
 runtime: {size: small}
-data:
-  - {dataset: hr.headcount, access: read}
-  - {dataset: directory.people, access: read}
-web: {route: /headcount-dashboard, type: spa}
-environments:
-  dev:  {auto_deploy: true}
-  prod: {auto_deploy: false, approvers: owners}
+connections:
+  - name: team-warehouse
+    engine: sqlite
+    path: ${INSIGHTS_WAREHOUSE_PATH}
+web:
+  route: /demo
+  type: spa

@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import secrets, telemetry
+from . import identity, secrets, telemetry
 from .errors import InsightsError
 
 
@@ -220,8 +220,9 @@ class SqlConnector(_Base):
         # than an import that would fail locally for everyone.
         raise ConnectionFailed(
             f"connection '{self.name}' uses engine '{self.engine}', whose driver is not "
-            f"installed in this environment. It ships in the `python-data` base image; "
-            f"locally, use the `sqlite` engine or point INSIGHTS_SECRET_* at a sandbox.",
+            f"installed in this environment. Add it to your pyproject.toml - the "
+            f"platform does not vendor drivers into an image, because that would mean "
+            f"every app carrying every team's driver.",
             connection=self.name,
             kind="driver_missing",
         )
@@ -276,6 +277,19 @@ def connect(name: str, *, manifest=None) -> Connector:
     production app at something nobody registered.
     """
     from . import config
+
+    # No connection without a caller the platform vouched for.
+    #
+    # The credential belongs to the APP, not to whoever is asking - so without this,
+    # an app reachable outside the edge would happily use its own credential on behalf
+    # of an anonymous caller. A web app gets its caller from the edge; a job gets a
+    # service identity from the scheduler. Anything else is an app running somewhere
+    # nobody authorised, and it should be able to read nothing.
+    #
+    # This is what keeps "running outside the edge is not an app with no user, it is
+    # an app where every check returns no" true of the data path as well as of
+    # `require_role`.
+    identity.require_trusted()
 
     manifest = manifest or config.manifest()
     declared = {c.name: c for c in manifest.connections}

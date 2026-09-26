@@ -49,7 +49,7 @@ def test_the_image_is_rendered_from_the_manifest(platform, as_app):
     as_app("app-web.yaml")
     rendered = scaffold.render_dockerfile(config.manifest())
 
-    assert "FROM insights-hub/python-web:0.1" in rendered   # pinned, never :latest
+    assert "FROM python:3.12-slim" in rendered              # a standard image, pinned
     # Check the FROM LINES, not the whole file: the template's own comment explains
     # why :latest is refused, and a naive substring search matched that comment.
     froms = [ln for ln in rendered.splitlines() if ln.startswith("FROM ")]
@@ -77,7 +77,7 @@ def test_the_job_image_has_no_web_server(platform, as_app):
     as_app("app-job.yaml")
     rendered = scaffold.render_dockerfile(config.manifest())
 
-    assert "python-data" in rendered
+    assert "uvicorn" not in rendered
     assert "COPY static/" not in rendered
 
 

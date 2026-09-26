@@ -1,12 +1,16 @@
-"""Evidence for ADR-003: telemetry structurally cannot carry tenant data."""
+"""Telemetry structurally cannot carry tenant data.
+
+The platform ships connectors and never sees a row, so the only way tenant data could
+reach a platform-wide sink is if an app logged it - by accident, in a debug line
+somebody left in. These rules make that raise at the point of writing rather than get
+scrubbed later at the sink, because scrubbing at the sink fails open: a pattern nobody
+anticipated goes straight through.
+"""
 
 import pytest
 
 from insights_sdk import telemetry
-from insights_sdk.broker import query
 from insights_sdk.errors import RedactionError
-
-from conftest import signed_in
 
 
 def test_a_log_record_cannot_carry_rows(platform):
@@ -17,36 +21,64 @@ def test_a_log_record_cannot_carry_rows(platform):
 
 
 def test_a_log_record_cannot_carry_a_payload_disguised_as_a_string(platform):
+    """The obvious way round the rule above: json.dumps(rows)."""
     log = telemetry.get_logger()
     with pytest.raises(RedactionError, match="payload in string form"):
         log.info("debug", blob="x" * 900)
 
 
 def test_facts_about_a_run_are_fine(platform):
+    """The shape of a result, never the result."""
     log = telemetry.get_logger()
     with telemetry.capture() as records:
-        log.info("query_complete", dataset="hr.headcount", rows=412, ms=38)
+        log.info("query_complete", connection="team-warehouse", rows=412, ms=38)
     assert records[0]["rows"] == 412
 
 
-def test_reading_restricted_data_arms_the_field_assertion(platform, as_app):
-    """Before the read, `base_salary` is just a word. After it, mentioning it raises -
-    because the field list came from the catalog when the broker resolved the dataset."""
+def test_a_connector_records_shape_and_never_content(platform, as_app):
+    """The record a query leaves behind: which connection, how long, how many rows.
+
+    Not the SQL. SQL carries table and column names and often a literal in a WHERE
+    clause, so a platform-wide log of tenant SQL is a data inventory nobody agreed to.
+    """
     as_app("app-job.yaml")
-    log = telemetry.get_logger()
+    from insights_sdk import connect
 
-    log.info("startup", note="checking base_salary column exists")     # fine: nothing armed yet
+    from conftest import signed_in
 
-    with signed_in("vidya@corp.example", "MG-PEOPLE-ANALYTICS,comp-analyst"):
-        query("hr.compensation", "SELECT employee_id FROM hr.compensation")
+    with signed_in("sp-demo"), telemetry.capture() as records:
+        rows = connect("team-warehouse").query(
+            "SELECT employee_name, base_salary FROM hr_compensation"
+        )
 
-        with pytest.raises(RedactionError, match="base_salary"):
-            log.info("startup", note="checking base_salary column exists")
+    assert rows and "base_salary" in rows[0]          # the app got its data
+    executed = [r for r in records if r["event"] == "query_executed"][0]
+    assert executed["connection"] == "team-warehouse"
+    assert executed["rows"] == 2
+    blob = " ".join(f"{k}={v}" for k, v in executed.items())
+    for leaked in ("SELECT", "base_salary", "Krishna", "94000"):
+        assert leaked not in blob, f"{leaked!r} reached the sink"
 
 
-def test_the_tenant_cannot_shorten_the_sensitive_field_list(platform, as_app):
-    """The list lives in the platform catalog. Tenant code has no API to edit it."""
-    import insights_sdk
+def test_a_failed_connection_records_the_kind_not_the_drivers_message(platform, as_app):
+    """A driver puts the host, the user and sometimes a query fragment in its error
+    text. The tenant sees all of it in the raised exception; the platform sees which
+    of six things went wrong."""
+    as_app("app-job.yaml")
+    import os
 
-    assert not hasattr(insights_sdk, "register_sensitive_fields")
-    assert not hasattr(insights_sdk, "clear_sensitive_fields")
+    from insights_sdk import ConnectionFailed, connect
+
+    from conftest import signed_in
+
+    os.environ["INSIGHTS_WAREHOUSE_PATH"] = "/nope/missing.db"
+    try:
+        with signed_in("sp-demo"), telemetry.capture() as records:
+            with pytest.raises(ConnectionFailed):
+                connect("team-warehouse").query("SELECT 1")
+    finally:
+        os.environ.pop("INSIGHTS_WAREHOUSE_PATH", None)
+
+    failed = [r for r in records if r["event"] == "connection_failed"][0]
+    assert failed["kind"] == "network"
+    assert "missing.db" not in " ".join(str(v) for v in failed.values())

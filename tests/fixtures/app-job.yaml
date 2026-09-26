@@ -1,13 +1,16 @@
 apiVersion: v1
-app: comp-report
+app: demo
 team: people-analytics
 kind: job
 access:
   manage:
     owners: [MG-PEOPLE-ANALYTICS]
 runtime: {size: medium}
-data:
-  - {dataset: hr.compensation, access: read}
+connections:
+  - name: team-warehouse
+    engine: sqlite
+    path: ${INSIGHTS_WAREHOUSE_PATH}
+    secret: warehouse-token
 job:
   schedule: "0 6 * * MON"
   timezone: Europe/Dublin

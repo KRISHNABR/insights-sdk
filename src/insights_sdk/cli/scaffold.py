@@ -37,23 +37,21 @@ MANIFEST = """\
 # {name} — everything the platform needs to know about this app.
 #
 # You declare WHAT you need. The platform decides HOW: which image, which credential,
-# which table, which cron, which IAM role, which corporate group. That is why there is
-# no connection string, no Dockerfile and no pipeline in this repository.
+# which cron, which IAM role, which corporate group. You own your code, your image and
+# your connections; the platform owns the road they travel on.
 apiVersion: v1
 app: {name}
 team: {team}
 kind: {kind}
 
-# Two different questions, deliberately kept apart.
-#   manage : who may change, deploy and govern this app   (control plane)
-#   roles  : who may use the running app                  (data plane)
-# Being able to deploy an app is not the same as being allowed to read what it reads.
+# Three tiers, and there is no fourth. They NEST: an owner satisfies every check a
+# contributor does, and a contributor every check a reader does - so nobody has to be
+# listed twice. `require_role("reader")` in your code checks against these.
 access:
   manage:
-    owners:       [{owner}]     # approve prod · request data access · answer for it
+    owners:       [{owner}]     # approve prod · change access · answer for it
     contributors: []            # deploy dev and uat · read logs · NOT prod
     readers:      []            # see it in `insights status`, nothing more
-  roles: []                     # e.g. {{name: {name}-viewer, groups: [{owner}]}}
 
 runtime:
   size: small                   # small | medium | large -> cpu/memory/replicas
@@ -324,84 +322,84 @@ __pycache__/
 #: nothing can drift.
 DOCKERFILE = """\
 # YOUR Dockerfile. Generated once by `insights new-app`; yours to edit from here.
-#   app:  {name}
-#   base: {base}
+#   app: {name}
 #
-# The platform does not rewrite this file and `insights upgrade-scaffold` does not
-# touch it - unlike .github/workflows/, which we do own. You can add build stages,
-# system packages, whatever your app needs.
+# The platform does not rewrite this file, does not publish a base image, and does not
+# patch one for you. It is an ordinary Python image and you own it - which also means
+# you can change the Python version on the next line whenever you need to.
 #
-# FOUR THINGS CI CHECKS, and why (ADR-004):
+# TWO THINGS CI CHECKS, and only two:
 #
-#   1. FROM is a published insights-hub base    we patch these; a base from Docker Hub
-#                                               is one nobody is patching for you
-#   2. no :latest                               an image you cannot name is one you
-#                                               cannot roll back to
-#   3. the final USER is not root               a container breakout should land on a
-#                                               user that owns nothing
-#   4. the base version is current              `insights doctor` warns, CI fails on
-#                                               prod deploys. THIS IS THE ONE THAT
-#                                               MATTERS: because this file is yours,
-#                                               a CVE fix in the base reaches you only
-#                                               when you bump the line below. We tell
-#                                               you loudly; we cannot do it for you.
-FROM insights-hub/{base}:{base_version}
+#   1. the base is PINNED, not :latest   an image you cannot name is one you cannot
+#                                        roll back to
+#   2. the final USER is not root        a container breakout should land on a user
+#                                        that owns nothing
+#
+# Everything else is a suggestion. Add build stages, system packages, a different
+# distro - CI will not stop you.
+FROM python:3.12-slim
+
+# uv, pinned, from its official image. It resolves dependencies in the image exactly
+# as it does on your laptop.
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
+
+RUN useradd --create-home --uid 10001 app
+WORKDIR /app
 
 # Your dependencies, from YOUR pyproject.toml, installed from the COMMITTED lockfile.
 # --frozen means the lock must already be current: the image resolves exactly what your
-# laptop resolved, or the build fails. "Works on my machine" is not debuggable by a
-# platform team of three.
+# laptop resolved, or the build fails.
 #
 # Copied before your source so a code change does not reinstall the world.
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 {extra_system}
 COPY src/ /app/src/
 COPY app.yaml /app/app.yaml
-{extra_static}"""
+{extra_static}
+USER app
+{run_block}"""
 
-#: The published family and their pinned versions. `insights runtimes` reads this.
-BASE_VERSIONS = {
-    "python-web": "0.1",
-    "python-data": "0.1",
-    "python-min": "0.1",
-}
+WEB_RUN_BLOCK = """EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \\
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--app-dir", "src"]
+"""
+
+JOB_RUN_BLOCK = """# A job runs to completion and exits. The scheduler starts it; there is no server
+# here and nothing to health-check.
+CMD ["python", "src/main.py"]
+"""
 
 
 def render_dockerfile(manifest) -> str:
-    """Render the image definition for an app, from what it declared.
+    """Render the Dockerfile a new app starts with.
 
-    Three sources, and the split is the point:
+    Called once, by `insights new-app` and by `insights build --write`. After that the
+    file belongs to the repo and nothing regenerates it.
 
-      runtime.base           the platform's runtime and the SDK   (ours)
-      pyproject.toml         the app's Python dependencies        (yours)
-      runtime.system_packages  apt-level needs, e.g. libgeos      (yours, declared)
-
-    A team never chooses a base OS, a Python version or a user id - but they own their
-    own dependency list, exactly as they would in any Python project. That is what
-    "bring your code" has to mean, or the platform is a cage.
+    A team owns their Python version, their distro and their dependency list, exactly
+    as in any Python project. The platform publishes no base image, so there is
+    nothing here anybody waits for us to patch.
     """
     system = tuple(getattr(manifest, "system_packages", ()) or ())
     extra_system = (
-        "\n# runtime.system_packages from app.yaml - the long tail, without a bespoke image\n"
+        "\n# runtime.system_packages from app.yaml\n"
         "USER root\n"
         f"RUN apt-get update && apt-get install -y --no-install-recommends {' '.join(system)} \\\n"
         "    && rm -rf /var/lib/apt/lists/*\n"
-        "USER insights\n"
         if system
         else ""
     )
-    extra_static = (
-        "COPY static/ /app/static/\n"
-        if manifest.web is not None and manifest.web.type == "spa"
-        else ""
-    )
+    is_web = getattr(manifest, "web", None) is not None
+    extra_static = "COPY static/ /app/static/\n" if is_web and manifest.web.type == "spa" else ""
     return DOCKERFILE.format(
         name=manifest.app,
-        base=manifest.default_base,
-        base_version=BASE_VERSIONS.get(manifest.default_base, "0.1"),
         extra_system=extra_system,
         extra_static=extra_static,
+        run_block=WEB_RUN_BLOCK if is_web else JOB_RUN_BLOCK,
     )
 
 
@@ -414,9 +412,8 @@ def render_dockerfile(manifest) -> str:
 #: The machine-readable version of "you own your code, we own the road it travels on".
 #:
 #: The Dockerfile is deliberately NOT here. It is generated once and then belongs to
-#: the tenant, so re-rendering it would silently discard their edits. That is the
-#: trade we made when we let teams own their image: they get control, and in exchange
-#: the platform can only WARN that a base image has moved, never move it for them.
+#: the tenant, so re-rendering it would silently discard their edits. The platform
+#: publishes no base image, so there is nothing for it to push into that file anyway.
 PLATFORM_OWNED = (
     Path(".github/workflows/ci.yml"),
     Path(".github/workflows/deploy-dev.yml"),
@@ -438,7 +435,6 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
     if target.exists() and any(target.iterdir()):
         raise SystemExit(f"{target} already exists and is not empty")
 
-    base = "python-web" if kind == "web" else "python-data"
     kind_block = (WEB_BLOCK if kind == "web" else JOB_BLOCK).format(name=name)
 
     # render_dockerfile() reads a manifest, and app.yaml does not exist yet - it is
@@ -447,14 +443,13 @@ def generate(*, target: Path, name: str, kind: str, team: str, owner: str) -> li
     view = SimpleNamespace(
         app=name,
         kind=kind,
-        default_base=base,
         web=SimpleNamespace(type="api") if kind == "web" else None,
         system_packages=(),
     )
 
     files: dict[Path, str] = {
         Path("app.yaml"): MANIFEST.format(
-            name=name, team=team, kind=kind, owner=owner, base=base, kind_block=kind_block
+            name=name, team=team, kind=kind, owner=owner, kind_block=kind_block
         ),
         Path("pyproject.toml"): PYPROJECT.format(
             name=name, PLATFORM_ORG=PLATFORM_ORG, PLATFORM_REF=PLATFORM_REF
