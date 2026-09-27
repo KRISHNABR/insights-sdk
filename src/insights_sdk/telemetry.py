@@ -1,11 +1,14 @@
 """Telemetry, and the boundary that keeps tenant data out of it.
 
-Two streams, deliberately separate:
+One stream, `events`: what the app did. Structured, tenant-authored, and freely
+readable by the platform team - which is exactly why it must never contain rows.
 
-    events   what the app did. Structured, tenant-authored, freely readable by the
-             platform team - which is exactly why it must never contain rows.
-    audit    what was read. Platform-authored, append-only, the artefact a compliance
-             reviewer is handed.
+There used to be a second stream, `audit`, written by the data broker: what was read,
+with the dataset, its classification and its owner. It went when the broker went
+(ADR-002). The platform no longer sits in the data path, so it has nothing to put in
+those fields, and a stream nobody writes is worse than no stream - it reads as "no
+reads happened" rather than "nothing records this". `STREAMS` below is the single
+source of truth, and `insights logs` takes its choices from it.
 
 The important decision here is *where* redaction happens. Scrubbing in the sink fails
 open: anything the scrubber does not recognise has already left the process. Raising at
@@ -52,6 +55,11 @@ def _reject_payloads(fields: dict[str, Any]) -> None:
                 f"telemetry field {key!r} is {len(value)} characters. Anything this large is a "
                 f"payload in string form; log an identifier or a length instead."
             )
+
+
+# Every stream that has a writer. `insights logs --stream` reads its choices from
+# here, so the CLI cannot offer a stream nothing produces.
+STREAMS = ("events",)
 
 
 def _base_record(stream: str, level: str, event: str) -> dict[str, Any]:
@@ -120,42 +128,6 @@ _logger = Logger()
 
 def get_logger() -> Logger:
     return _logger
-
-
-def audit_read(
-    *,
-    dataset: str,
-    classification: str,
-    owner: str,
-    connection: str,
-    rows: int,
-    ms: int,
-    masked_fields: int = 0,
-    via_grant: bool = False,
-    break_glass: str | None = None,
-) -> dict[str, Any]:
-    """Record one read. Written by the broker, never by tenant code.
-
-    Note `masked_fields` is a COUNT, not a list of names: the audit stream is read by
-    more people than the data is, so it must not become a description of the data's
-    shape. Same reasoning as the field-name assertion above.
-    """
-    record = _base_record("audit", "info", "dataset_read")
-    record.update(
-        dataset=dataset,
-        classification=classification,
-        owner=owner,
-        connection=connection,
-        rows=rows,
-        ms=ms,
-        masked_fields=masked_fields,
-        via_grant=via_grant,
-    )
-    if break_glass:
-        record["break_glass"] = break_glass
-    _reject_payloads({k: v for k, v in record.items()})
-    _write(record)
-    return record
 
 
 @contextmanager

@@ -268,10 +268,12 @@ log = get_logger()
 def main() -> None:
     log.info("hello", note="replace me")
 
-    # Add a dataset to app.yaml, then read it like this:
+    # Add a connection to app.yaml, then read from it like this:
     #
-    #     rows = query("your.dataset", "SELECT * FROM your.dataset")
-    #     output("summary", summarise(rows))   # declare it in outputs[] first
+    #     from insights_sdk import connect, output
+    #
+    #     rows = connect("hr-warehouse").query("SELECT dept, headcount FROM hr_headcount")
+    #     output("summary", rows)              # no declaration needed
     #     log.info("done", rows=len(rows))     # log the SHAPE, never the rows
 
 
@@ -381,7 +383,7 @@ A {kind} app on Insights Hub, owned by **{team}**.
 ```bash
 uv sync
 uv run insights doctor      # check the manifest the way CI will
-uv run insights datasets    # what data you can ask for
+uv run insights connections # what you declared, and whether the secrets resolve
 uv run insights build --show  # exactly what your container will be
 ```
 

@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from .errors import ConfigError, ManifestError, UnknownDatasetError
+from .errors import ConfigError, ManifestError
 
 DEFAULT_ENV = "local"
 

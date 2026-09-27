@@ -82,3 +82,51 @@ def test_a_failed_connection_records_the_kind_not_the_drivers_message(platform, 
     failed = [r for r in records if r["event"] == "connection_failed"][0]
     assert failed["kind"] == "network"
     assert "missing.db" not in " ".join(str(v) for v in failed.values())
+
+
+def test_every_stream_the_cli_offers_has_a_writer():
+    """A stream nobody writes is worse than no stream at all.
+
+    The `audit` stream was the data broker's: what was read, with the dataset, its
+    classification and its owner. The broker was removed (ADR-002) and its writer went
+    with it, but the stream stayed in `insights logs --stream` for a while. An operator
+    following the RUNBOOK during a suspected data incident ran it and was told
+    "no telemetry. Run an app" - which reads as "nothing happened" rather than
+    "nothing records this", on the one path where that distinction matters most.
+
+    So the CLI now takes its choices from `telemetry.STREAMS`, and this pins that every
+    name in it is actually produced by some module in the SDK.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(telemetry.__file__).parent
+    written = set()
+    for module in src.rglob("*.py"):
+        tree = ast.parse(module.read_text())
+        for node in ast.walk(tree):
+            # _base_record("<stream>", level, event) - the only way a record is made
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_base_record":
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    written.add(node.args[0].value)
+
+    assert written, "found no _base_record call - has the record constructor been renamed?"
+    for stream in telemetry.STREAMS:
+        assert stream in written, (
+            f"`insights logs --stream {stream}` is offered, but nothing in the SDK "
+            f"writes to it. Streams with a writer: {sorted(written)}"
+        )
+
+
+def test_the_cli_cannot_offer_a_stream_the_sdk_does_not_define():
+    """The CLI's --stream choices are derived, not typed a second time."""
+    from insights_sdk.cli import main as cli
+
+    parser = cli._build_parser() if hasattr(cli, "_build_parser") else None
+    if parser is None:
+        import inspect
+        source = inspect.getsource(cli)
+        assert '"--stream", default="all", choices=("all", *telemetry.STREAMS)' in source, (
+            "`insights logs --stream` should take its choices from telemetry.STREAMS, "
+            "not from a hand-written tuple that can drift from the writers."
+        )

@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import __version__, config, connectors, identity, secrets
+from .. import __version__, config, connectors, identity, secrets, telemetry
 from ..errors import InsightsError
 from . import scaffold
 
@@ -518,7 +518,7 @@ def cmd_logs(args) -> int:
         return 0
 
     records = []
-    for stream in (("events", "audit") if args.stream == "all" else (args.stream,)):
+    for stream in (telemetry.STREAMS if args.stream == "all" else (args.stream,)):
         for record in _read_sink(stream):
             records.append(record)
     if args.app:
@@ -547,13 +547,11 @@ def cmd_logs(args) -> int:
         extra = " ".join(
             f"{k}={v}" for k, v in record.items() if k not in common and v is not None
         )
-        marker = "*" if record.get("stream") == "audit" else " "
-        print(f"{record.get('ts',''):<21} {marker}{record.get('stream',''):<6} "
+        print(f"{record.get('ts',''):<21} {record.get('stream',''):<7} "
               f"{record.get('app',''):<20} {record.get('caller',''):<24} "
               f"{record.get('event','')}  {extra}")
 
-    audits = sum(1 for r in records if r.get("stream") == "audit")
-    print(f"\n{len(records)} record(s), {audits} marked * - a read of a governed dataset.")
+    print(f"\n{len(records)} record(s).")
     print(f"read from {_sink_dir()}")
     return 0
 
@@ -958,7 +956,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--app", help="only this app")
     logs.add_argument("--startup", action="store_true",
                       help="the process log (uvicorn, import errors) instead of telemetry")
-    logs.add_argument("--stream", default="all", choices=("all", "events", "audit"))
+    logs.add_argument("--stream", default="all", choices=("all", *telemetry.STREAMS))
     logs.add_argument("--event", help="only this event name, e.g. query_executed")
     logs.add_argument("-n", "--lines", type=int, default=40)
     logs.add_argument("--json", action="store_true", help="raw records, for piping to jq")

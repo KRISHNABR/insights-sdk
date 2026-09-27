@@ -29,23 +29,6 @@ class ConfigError(InsightsError):
     """The platform's own configuration is missing or unreadable. A platform bug, not a tenant one."""
 
 
-class UnknownDatasetError(InsightsError):
-    """The dataset is not in the platform catalog. Nobody can read it, entitled or not."""
-
-    adr = "ADR-002"
-
-
-class EntitlementError(InsightsError):
-    """The app is not entitled to this dataset.
-
-    Two distinct causes, both landing here on purpose:
-      - the dataset is not declared in app.yaml            (no intent)
-      - the dataset is restricted and has no active grant  (no approval)
-    """
-
-    adr = "ADR-002 s4"
-
-
 class IdentityError(InsightsError):
     """There is no trusted caller. Raised when an app runs outside the platform edge.
 
