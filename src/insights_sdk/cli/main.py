@@ -408,7 +408,8 @@ def cmd_status(args) -> int:
 def cmd_compliance_report(args) -> int:
     """The artefact you hand a compliance reviewer.
 
-    Everything in it is read from the registry, the manifests and the audit sink -
+    Everything in it is read from the deployment registry, the manifests and the
+    telemetry sink -
     nothing is asserted by this command. That is the point: a report the platform
     team writes by hand is a claim, and a reviewer is right not to accept it.
 
@@ -420,26 +421,46 @@ def cmd_compliance_report(args) -> int:
     What it deliberately cannot show is a row of anybody's data. There is none in the
     sink to show.
     """
-    registry = _registered()
+    # Deliberately NOT _registered(): that prefers apps.local.json, which holds only
+    # what happens to be running on this laptop. This report is about what is
+    # DEPLOYED, and it was silently reporting a subset - a compliance artefact that
+    # under-reports without saying so is worse than no artefact.
+    source = _apps_file()
+    registry = (
+        {k: v for k, v in json.loads(source.read_text()).items() if not k.startswith("_")}
+        if source.is_file() else {}
+    )
     events = _read_sink("events")
 
-    apps = sorted(k for k in registry if not k.startswith("_"))
+    apps = sorted(registry)
     if args.app:
         apps = [a for a in apps if a == args.app]
 
     print("CONNECTIONS AND CREDENTIALS\n")
     print(f"  {'APP':<24} {'CONNECTION':<20} {'ENGINE':<16} SECRET")
+    unreadable: list[tuple[str, str]] = []
     for name in apps:
         path = Path(registry[name].get("path", "")) / "app.yaml"
         if not path.is_file():
+            unreadable.append((name, f"no manifest at {path}"))
             continue
         try:
             manifest = config.load_manifest(path)
-        except InsightsError:
+        except InsightsError as exc:
+            unreadable.append((name, str(exc).splitlines()[0]))
             continue
         for spec in manifest.connections:
             secret = secrets.path_for(name, spec.secret) if spec.secret else "-"
             print(f"  {name:<24} {spec.name:<20} {spec.engine:<16} {secret}")
+
+    # An app we could not read is a HOLE in the evidence, and it has to be visible.
+    # Silently skipping it makes the report read as "this app holds no connections".
+    if unreadable:
+        print(f"\n  NOT COVERED BY THIS REPORT{'':21}{len(unreadable)}")
+        for name, why in unreadable:
+            print(f"    {name:<24} {why}")
+        print("    Their connections are unknown to this report. Do not read their")
+        print("    absence above as 'no connections'.")
 
     print("\nWHO CAN READ EACH SECRET")
     print("  the app's own identity (sp-<app>), on its own prefix, and the owning group.")
@@ -462,7 +483,7 @@ def cmd_compliance_report(args) -> int:
 
     violations = [r for r in events if r.get("event") == "redaction_violation"]
     print(f"\nREDACTION ASSERTIONS{'':30}active, {len(violations)} violations")
-    print(f"\nevidence read from {_registry()} and {_sink_dir()}")
+    print(f"\nevidence read from {source} and {_sink_dir()}")
     return 0
 
 

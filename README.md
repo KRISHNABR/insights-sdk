@@ -220,7 +220,7 @@ uv run --no-project --with pytest --with pyyaml --with fastapi --with httpx \
   --with-editable . python -m pytest -q
 ```
 
-91 tests. None of these are unit tests for their own sake — each turns a claim in an ADR into
+93 tests. None of these are unit tests for their own sake — each turns a claim in an ADR into
 evidence.
 
 | File | What it proves |

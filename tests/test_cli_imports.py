@@ -8,6 +8,7 @@ Cheap tests that catch whole-module breakage are worth more than their line coun
 """
 
 import importlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -162,3 +163,79 @@ def test_new_app_works_outside_the_workspace(tmp_path, monkeypatch):
                  "--team", "demo", "--owner", "MG-DEMO"]) == 0
     assert (tmp_path / "insights-forecast" / "app.yaml").is_file()
     assert (tmp_path / "insights-forecast" / "Dockerfile").is_file()
+
+
+def test_the_compliance_report_reads_the_deployment_registry_not_the_local_one(tmp_path, monkeypatch, capsys):
+    """`insights up` writes apps.local.json, and `_registered()` prefers it.
+
+    That is right for `status`, for `logs` and for the edge's routing - they are all
+    about what is running. It is wrong for the compliance report, which is about what
+    is DEPLOYED, and it read as a complete list either way: an app that was simply not
+    running on that laptop vanished from the evidence with no indication.
+    """
+    import json
+
+    from insights_sdk.cli import main as cli
+
+    platform = tmp_path / "insights-platform"
+    registry = platform / "control" / "registry"
+    registry.mkdir(parents=True)
+    (platform / "runtime" / "sinks").mkdir(parents=True)
+
+    app = tmp_path / "insights-deployed-only"
+    app.mkdir()
+    (app / "app.yaml").write_text(
+        "apiVersion: v1\napp: deployed-only\nteam: t\nkind: job\n"
+        "access:\n  manage:\n    owners: [MG-T]\n"
+        "connections:\n  - name: warehouse\n    engine: sqlite\n    path: ./w.db\n"
+        'job:\n  schedule: "0 6 * * MON"\n  timezone: UTC\n'
+    )
+    deployed = {"deployed-only": {"team": "t", "kind": "job", "path": str(app)}}
+    (registry / "apps.json").write_text(json.dumps(deployed))
+    # what happens to be running locally - deliberately a DIFFERENT set
+    (registry / "apps.local.json").write_text(json.dumps({"console": {"team": "p", "kind": "web", "path": "."}}))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("INSIGHTS_REGISTRY_DIR", str(registry))
+
+    cli.cmd_compliance_report(SimpleNamespace(app=None))
+    out = capsys.readouterr().out
+
+    assert "deployed-only" in out, (
+        "the compliance report omitted a DEPLOYED app because it was not running "
+        "locally - apps.local.json must not shadow apps.json here"
+    )
+    assert "apps.json" in out and "apps.local.json" not in out, (
+        "the report must name the exact file it read; naming the directory is what "
+        "made the substitution invisible"
+    )
+
+
+def test_an_app_the_compliance_report_cannot_read_is_named_not_skipped(tmp_path, monkeypatch, capsys):
+    """A hole in the evidence has to be visible as a hole.
+
+    Skipping an unreadable manifest silently makes the report say "this app holds no
+    connections", which is a different and much worse claim than "we could not tell".
+    """
+    import json
+
+    from insights_sdk.cli import main as cli
+
+    platform = tmp_path / "insights-platform"
+    registry = platform / "control" / "registry"
+    registry.mkdir(parents=True)
+    (platform / "runtime" / "sinks").mkdir(parents=True)
+    (registry / "apps.json").write_text(
+        json.dumps({"gone": {"team": "t", "kind": "job", "path": str(tmp_path / "nowhere")}})
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("INSIGHTS_REGISTRY_DIR", str(registry))
+
+    cli.cmd_compliance_report(SimpleNamespace(app=None))
+    out = capsys.readouterr().out
+
+    assert "NOT COVERED" in out and "gone" in out, (
+        "an app whose manifest could not be read must be named in the report, "
+        f"not silently dropped. Got:\n{out}"
+    )
