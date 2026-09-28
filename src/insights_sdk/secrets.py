@@ -32,9 +32,11 @@ telemetry, and never puts one in an exception message. See `Secret.__repr__`.
 
 LOCALLY
 -------
-A file per secret under `runtime/fakes/secrets/`, gitignored, seeded with obvious
-fakes. The lookup path and the scoping rule are identical, so code that works here
-works there - the only thing that changes is who enforces the scoping.
+A `.env` file in the app's own repo, gitignored, read only when INSIGHTS_ENV=local
+(CI refuses a committed one). An injected INSIGHTS_SECRET_<NAME> variable always wins,
+which is how production delivers a value. The name and the scoping rule are identical
+in both places, so code that works here works there - the only thing that changes is
+who enforces the scoping: a file on a laptop, IAM in an account.
 """
 
 from __future__ import annotations

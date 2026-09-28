@@ -727,7 +727,10 @@ def _register(app: str, entry: dict | None) -> None:
 
 
 def cmd_up(args) -> int:
-    """Start the whole local platform: warehouse, directory stub, every web app, the edge."""
+    """Start the local platform: warehouse stub, directory stub, the edge and the console.
+
+    Tenant apps are NOT started here - each runs from its own repo with `insights serve`.
+    """
     workspace, platform = _workspace(), _platform()
 
     # Check before starting anything. A half-started stack that fails on the third
